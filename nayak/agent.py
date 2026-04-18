@@ -1,22 +1,28 @@
 """
 agent.py — The NAYAK Agent: the core autonomous runtime loop.
 
-Orchestrates the perceive → think → act → remember cycle.
+Orchestrates the perceive -> think -> act -> remember cycle.
+
+Provider selection via NAYAK_PROVIDER env var:
+  nvidia  (default) — NVIDIA NIM cloud API
+  ollama            — Ollama local or cloud (no key needed locally)
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from nayak.brain.groq import Action, ActionType, Brain
+from nayak.brain import Action, ActionType
 from nayak.eyes.browser import Browser, PageState
 from nayak.hands.computer import Computer
 from nayak.memory.store import MemoryStore
@@ -26,6 +32,16 @@ load_dotenv()  # Load .env file if present
 logger = logging.getLogger(__name__)
 console = Console()
 
+# ──────────────────────────────────────────────────────────────────
+# PROVIDER
+# ──────────────────────────────────────────────────────────────────
+PROVIDER = os.environ.get("NAYAK_PROVIDER", "ollama").lower()
+
+if PROVIDER == "gemini":
+    from nayak.brain.gemini import decide, generate, plan
+else:
+    from nayak.brain.ollama import decide, generate, plan
+
 
 @dataclass
 class AgentConfig:
@@ -34,7 +50,6 @@ class AgentConfig:
     session_id: str = ""
     max_steps: int = 30
     headless: bool = True
-    groq_api_key: str | None = None
     db_path: str | None = None
 
     def __post_init__(self) -> None:
@@ -48,7 +63,7 @@ class Agent:
     """
     NAYAK autonomous agent.
 
-    Perceive → Think → Act → Remember until goal is complete or max_steps hit.
+    Perceive -> Think -> Act -> Remember until goal is complete or max_steps hit.
 
     Example::
 
@@ -59,16 +74,27 @@ class Agent:
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        self._brain = Brain(api_key=config.groq_api_key)
         self._browser = Browser(headless=config.headless)
         self._memory = MemoryStore(
             agent_id=config.agent_id,
             session_id=config.session_id,
             db_path=config.db_path,
         )
-        self._computer: Computer | None = None
+
+        # Internal state
         self._step = 0
         self._done = False
+        self._computer: Computer | None = None
+
+        # FIX 1 — Guaranteed report saving
+        self.extracted_content: list[str] = []
+
+        # FIX 2 — Failure / stuck-action tracking
+        self._last_action_type: ActionType | None = None
+        self._failure_count = 0
+
+        # FIX 2 — URL visit counter (in-memory for O(1) look-up)
+        self._url_visit_counts: Counter[str] = Counter()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -76,8 +102,10 @@ class Agent:
 
     async def run(self) -> str:
         """
-        Execute the perceive→think→act→remember loop.
-        Returns a short description of the final outcome.
+        Execute the perceive -> think -> act -> remember loop.
+
+        FIX 6 — Always calls _force_save_report() before exiting and
+        always cleans up the browser / DB connection via finally.
         """
         self._print_banner()
         await self._memory.init()
@@ -85,42 +113,75 @@ class Agent:
         self._computer = Computer(self._browser.page)
 
         try:
-            await self._computer.navigate("https://www.google.com")
-
-            while self._step < self.config.max_steps and not self._done:
-                self._step += 1
-                console.rule(
-                    f"[bold cyan]Step {self._step} / {self.config.max_steps}[/bold cyan]"
-                )
-
-                # 1. PERCEIVE
-                state = await self._perceive()
-
-                # 2. THINK
-                action = await self._think(state)
-
-                # 3. ACT
-                result = await self._act(action)
-
-                # 4. REMEMBER
-                await self._remember(action, result)
-
-                if action.type == ActionType.FINISH:
-                    self._done = True
-                    self._print_finish(action.reason)
-                    return action.reason
-
-            if not self._done:
-                msg = (
-                    f"Reached max steps ({self.config.max_steps}) "
-                    "without completing the goal."
-                )
-                console.print(f"\n[yellow][WARNING] {msg}[/yellow]")
-                return msg
-
+            return await self._run_loop()
+        except KeyboardInterrupt:
+            console.print("\n[NAYAK] Stopped by user.")
+            await self._force_save_report()
+            return "Stopped by user"
+        except Exception as e:
+            console.print(f"\n[NAYAK] Unexpected error: {e}")
+            logger.exception("Unhandled exception in agent run loop")
+            await self._force_save_report()
+            return f"Error: {e}"
         finally:
             await self._browser.stop()
             await self._memory.close()
+            console.print("[NAYAK] Agent shutdown complete.")
+
+    async def _run_loop(self) -> str:
+        """The main perceive → think → act → remember loop."""
+        await self._computer.navigate("https://www.google.com")
+
+        while self._step < self.config.max_steps and not self._done:
+            self._step += 1
+            steps_remaining = self.config.max_steps - self._step
+
+            # FIX 2 — Hard stop at < 10 steps: save immediately and exit
+            if steps_remaining < 10:
+                console.print(
+                    "[bold red][NAYAK] Less than 10 steps remaining. "
+                    "Saving report and exiting.[/bold red]"
+                )
+                await self._force_save_report()
+                return "Saved report — ran out of steps."
+
+            # FIX 2 — Soft warning at < 20 steps
+            if steps_remaining < 20:
+                console.print(
+                    "[yellow][NAYAK] Less than 20 steps remaining. "
+                    "Prioritising extraction.[/yellow]"
+                )
+
+            console.rule(
+                f"[bold cyan]Step {self._step} / {self.config.max_steps}[/bold cyan]"
+            )
+
+            # 1. PERCEIVE
+            state = await self._perceive()
+
+            # 2. THINK
+            action = await self._think(state)
+
+            # 3. ACT
+            result = await self._act(action)
+
+            # 4. REMEMBER
+            await self._remember(action, result)
+
+            if action.type == ActionType.FINISH:
+                self._done = True
+                await self._force_save_report()
+                self._print_finish(action.reason)
+                return action.reason
+
+        if not self._done:
+            msg = (
+                f"Reached max steps ({self.config.max_steps}) "
+                "without completing the goal."
+            )
+            console.print(f"\n[yellow][WARNING] {msg}[/yellow]")
+            await self._force_save_report()
+            return msg
 
         return "Agent finished."
 
@@ -145,21 +206,53 @@ class Agent:
         console.print(
             f"[dim][THINK] Thinking... ({len(memory_context)} memory entries)[/dim]"
         )
-        # Inject auto-save warning if running out of steps
-        if self._step >= self.config.max_steps - 10:
-            urgent_msg = (
-                "URGENT: You have less than 10 steps remaining. "
-                "Save your report NOW using save_file action then finish."
-            )
-            context_str += f"\n\n[SYSTEM]: {urgent_msg}"
-            console.print(f"[bold red]{urgent_msg}[/bold red]")
 
-        action = self._brain.decide(
+        steps_remaining = self.config.max_steps - self._step
+        system_notes: list[str] = []
+
+        # FIX 2 — Urgent warning injected into prompt when steps are low
+        if steps_remaining < 20:
+            system_notes.append(
+                "URGENT: Less than 20 steps remaining. "
+                "Extract key information now and save report immediately."
+            )
+
+        # FIX 2 — Detect URL repeated visits
+        current_url = state.url
+        visit_count = self._url_visit_counts[current_url]
+        if visit_count >= 3:
+            console.print(
+                f"[bold red][NAYAK] Already visited {current_url} "
+                f"{visit_count} times. Nudging agent to skip.[/bold red]"
+            )
+            system_notes.append(
+                f"You already visited {current_url} {visit_count} times. "
+                "Do not go there again. Move to the next planned step."
+            )
+
+        # FIX 2 — Stuck-action detection
+        if self._failure_count >= 3:
+            console.print(
+                f"[NAYAK] Skipping stuck action '{self._last_action_type}' "
+                "after 3 failures"
+            )
+            system_notes.append(
+                f"Your last action '{self._last_action_type}' failed "
+                "3 times in a row. Skip it and move to the next logical step."
+            )
+            self._failure_count = 0
+
+        if system_notes:
+            note_str = "\n".join([f"[SYSTEM]: {note}" for note in system_notes])
+            context_str += f"\n\n{note_str}"
+
+        action = await decide(
             goal=self.config.goal,
             step=self._step,
             url=state.url,
             page_title=state.title,
             page_text=state.text,
+            screenshot_b64=state.screenshot_b64,
             memory_context=context_str,
         )
         console.print(
@@ -179,7 +272,10 @@ class Agent:
 
         match action.type:
             case ActionType.NAVIGATE:
-                result = await computer.navigate(action.url or "https://www.google.com")
+                url = action.url or "https://www.google.com"
+                result = await computer.navigate(url)
+                # FIX 2 — Track visited URLs
+                self._url_visit_counts[self._browser.page.url] += 1
 
             case ActionType.CLICK:
                 if action.selector:
@@ -205,14 +301,39 @@ class Agent:
                 )
 
             case ActionType.EXTRACT:
-                text = await computer.extract_text()
-                result = f"Extracted {len(text)} chars: {text[:200]}…"
+                # FIX 1 — Append every extraction to self.extracted_content
+                text = await computer.extract()
+                self.extracted_content.append(
+                    f"[Source: {self._browser.page.url}]\n{text}"
+                )
+                result = f"Extracted {len(text)} chars from {self._browser.page.url}"
 
             case ActionType.SAVE_FILE:
                 result = await computer.save_file(
                     filename=action.filename or "output.txt",
-                    content=action.content or action.text or "",
+                    content=action.text or "",
                 )
+                if not ("failed" in result.lower() or "error" in result.lower()):
+                    console.print("[NAYAK] File saved. Task complete.")
+                    self._done = True
+
+            case ActionType.SEARCH:
+                search_result = await computer.google_search(
+                    query=action.text or ""
+                )
+                # FIX 1 — Search results count as extracted content
+                if search_result and "failed" not in search_result.lower():
+                    self.extracted_content.append(
+                        f"[Google Search: {action.text}]\n{search_result}"
+                    )
+                result = search_result
+
+            case ActionType.PRESS_KEY:
+                if action.key:
+                    await computer.page.keyboard.press(action.key)
+                    result = f"Pressed key: {action.key}"
+                else:
+                    result = "press_key action missing key — skipped"
 
             case ActionType.FINISH:
                 result = f"Goal completed: {action.reason}"
@@ -220,9 +341,64 @@ class Agent:
             case _:
                 result = f"Unknown action type '{action.type}' — skipped"
 
+        # FIX 2 — Consecutive failure tracking
+        curr_res = result.lower()
+        failure_keywords = ("failed", "error", "not found", "timeout", "could not")
+        is_failure = any(k in curr_res for k in failure_keywords)
+
+        if action.type == self._last_action_type and is_failure:
+            self._failure_count += 1
+        elif not is_failure:
+            self._failure_count = 0
+
+        self._last_action_type = action.type
+
         console.print(f"[bold blue]Result:[/bold blue] {result}")
         await asyncio.sleep(0.8)
         return result
+
+    # ------------------------------------------------------------------
+    # FIX 1 — Guaranteed report saving
+    # ------------------------------------------------------------------
+
+    async def _force_save_report(self) -> bool:
+        """
+        Generate and save the final report from all extracted content.
+
+        Called on every exit path — FINISH, steps < 10, KeyboardInterrupt,
+        unhandled exception, and max_steps reached.
+        """
+        if not self.extracted_content:
+            console.print("[NAYAK] No content extracted yet — skipping report save.")
+            return False
+
+        combined = "\n\n".join(self.extracted_content)
+        if len(combined) < 100:
+            console.print("[NAYAK] Extracted content too short — skipping report.")
+            return False
+
+        prompt = f"""
+Goal was: {self.config.goal}
+
+Content extracted from websites:
+{combined}
+
+Write a complete markdown report answering the goal.
+Include all relevant information found.
+Be detailed and well structured.
+Use headers, bullet points, and sections.
+"""
+        try:
+            report = await generate(prompt)
+            filename = "report.md"
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(report)
+            console.print(f"[bold green][NAYAK] Report saved to {filename}[/bold green]")
+            return True
+        except Exception as e:
+            logger.error("_force_save_report() failed: %s", e)
+            console.print(f"[NAYAK] Failed to generate/save report: {e}")
+            return False
 
     async def _remember(self, action: Action, result: str) -> None:
         """Persist step data to SQLite memory."""
@@ -245,7 +421,8 @@ class Agent:
                 subtitle=Text(
                     f"Session: {self.config.session_id[:8]}…  "
                     f"Agent: {self.config.agent_id}  "
-                    f"Max steps: {self.config.max_steps}",
+                    f"Max steps: {self.config.max_steps}  "
+                    f"Provider: {PROVIDER.upper()}",
                     style="dim",
                 ),
                 border_style="blue",

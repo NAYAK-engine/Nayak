@@ -6,7 +6,6 @@ Database file: nayak_memory.db (in ~/.nayak/ by default).
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,6 +71,7 @@ class MemoryStore:
         await store.init()
         await store.save(step=1, action="[NAVIGATE] url='...'", result="HTTP 200", goal="...")
         lines = await store.get_recent(n=10)
+        urls  = await store.get_visited_urls(session_id="run-001")
         await store.close()
     """
 
@@ -131,6 +131,33 @@ class MemoryStore:
             rows = await cursor.fetchall()
         entries = [MemoryEntry.from_row(r) for r in reversed(rows)]
         return [e.to_context_line() for e in entries]
+
+    async def get_visited_urls(self, session_id: str | None = None) -> list[str]:
+        """
+        Return a list of all URLs (result strings) from navigate actions.
+
+        FIX 7 — used by the agent to detect repeat visits and skip URLs
+        that have been visited more than 3 times.
+
+        Args:
+            session_id: If provided, restrict to that session only.
+                        Defaults to this store's own session_id.
+        """
+        if self._conn is None:
+            raise RuntimeError("MemoryStore.init() must be called first")
+        sid = session_id or self.session_id
+        async with self._conn.execute(
+            """
+            SELECT result FROM memory
+            WHERE agent_id = ?
+              AND session_id = ?
+              AND (action LIKE '%NAVIGATE%' OR action LIKE '%navigate%')
+            ORDER BY id ASC
+            """,
+            (self.agent_id, sid),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [row["result"] for row in rows]
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """Return metadata for every session of this agent."""

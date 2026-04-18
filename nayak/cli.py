@@ -33,52 +33,82 @@ app = typer.Typer(
 console = Console()
 
 
-@app.command()
-def run(
-    goal: Annotated[
-        str,
-        typer.Option("--goal", "-g", help="Natural language goal for the agent."),
-    ],
-    max_steps: Annotated[
-        int,
-        typer.Option("--max-steps", "-n", help="Maximum perceive-think-act steps."),
-    ] = 100,
-    agent_id: Annotated[
-        Optional[str],
-        typer.Option("--agent-id", help="Persistent agent identifier."),
-    ] = None,
-    no_headless: Annotated[
-        bool,
-        typer.Option("--no-headless", help="Show the browser window."),
-    ] = False,
-    db_path: Annotated[
-        Optional[str],
-        typer.Option("--db", help="Override the default SQLite database path."),
-    ] = None,
-) -> None:
+def _check_provider() -> bool:
     """
-    Run NAYAK autonomously toward a [bold yellow]goal[/bold yellow].
+    Validate that the selected provider has what it needs.
+    Since we are only using Ollama, we only check for cloud API key if in cloud mode.
+    """
+    mode = os.environ.get("OLLAMA_MODE", "local").lower()
+    if mode == "cloud":
+        key = os.environ.get("OLLAMA_API_KEY", "")
+        if not key:
+            console.print(
+                "[bold red]Error:[/bold red] OLLAMA_MODE=cloud requires OLLAMA_API_KEY.\n"
+                "Either set OLLAMA_API_KEY or switch to OLLAMA_MODE=local."
+            )
+            return False
+    return True
 
-    Example:
-        nayak run --goal "Find the top 3 AI robotics companies and save report.md"
-    """
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        console.print(
-            "[bold red]Error:[/bold red] GROQ_API_KEY is not set.\n"
-            "Get your free key at [link=https://console.groq.com/keys]console.groq.com/keys[/link]\n"
-            "Then run: [italic]set GROQ_API_KEY=gsk-...[/italic]  (Windows)\n"
-            "       or: [italic]export GROQ_API_KEY=gsk-...[/italic]  (macOS/Linux)"
-        )
+
+def calculate_steps(goal: str) -> int:
+    goal_lower = goal.lower()
+    
+    # Simple tasks — fast
+    simple_keywords = [
+        "what", "who", "when", "where",
+        "find", "search", "look up", "check"
+    ]
+    
+    # Medium tasks
+    medium_keywords = [
+        "visit", "read", "compare", 
+        "list", "summarize", "explain"
+    ]
+    
+    # Complex tasks — need more steps
+    complex_keywords = [
+        "research", "analyze", "report",
+        "save", "write", "collect", 
+        "multiple", "all", "every"
+    ]
+    
+    word_count = len(goal.split())
+    
+    if any(k in goal_lower for k in complex_keywords):
+        base = 80
+    elif any(k in goal_lower for k in medium_keywords):
+        base = 40
+    elif any(k in goal_lower for k in simple_keywords):
+        base = 20
+    else:
+        base = 40
+    
+    # More words = more complex
+    if word_count > 20:
+        base += 20
+    elif word_count > 10:
+        base += 10
+    
+    return min(base, 100)
+
+
+@app.command()
+def run(goal: str):
+    """Run NAYAK with your goal."""
+    steps = calculate_steps(goal)
+    print(f"[NAYAK] Goal received.")
+    print(f"[NAYAK] Complexity: {steps} steps allocated.")
+    print(f"[NAYAK] Starting now...")
+    
+    if not _check_provider():
         raise typer.Exit(code=1)
 
     config = AgentConfig(
         goal=goal,
-        agent_id=agent_id or "nayak-agent",
-        max_steps=max_steps,
-        headless=not no_headless,
-        groq_api_key=api_key,
-        db_path=db_path,
+        agent_id="nayak-agent",
+        max_steps=steps,
+        headless=True,
+        db_path=None,
     )
 
     async def _run() -> None:
@@ -87,6 +117,33 @@ def run(
         console.print(f"\n[bold]Final outcome:[/bold] {outcome}")
 
     asyncio.run(_run())
+
+
+@app.command()
+def ask(question: str):
+    """Quick single question answers."""
+    steps = 20
+    print(f"[NAYAK] Question received.")
+    print(f"[NAYAK] Complexity: {steps} steps allocated (Fast).")
+    print(f"[NAYAK] Processing...")
+
+    if not _check_provider():
+        raise typer.Exit(code=1)
+
+    config = AgentConfig(
+        goal=question,
+        agent_id="nayak-ask-agent",
+        max_steps=steps,
+        headless=True,
+        db_path=None,
+    )
+
+    async def _ask() -> None:
+        agent = Agent(config)
+        outcome = await agent.run()
+        console.print(f"\n[bold]Answer:[/bold] {outcome}")
+
+    asyncio.run(_ask())
 
 
 @app.command()

@@ -6,116 +6,84 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue)](https://python.org)
+[![Ollama](https://img.shields.io/badge/AI-Ollama-black)](https://ollama.com)
+[![Gemini](https://img.shields.io/badge/AI-Gemini-blue)](https://aistudio.google.com)
 [![Status](https://img.shields.io/badge/Status-Alpha-orange)]()
 
 ---
 
 ## What Is NAYAK?
 
-NAYAK is a free, open source runtime engine that powers 
+NAYAK is a free open source runtime engine that powers 
 autonomous AI agents that work in the real world.
 
-You give it a goal. It thinks. It acts. It remembers. 
-It completes the task. No human needed.
+You give it a goal in plain English.
+It thinks. It acts. It remembers. It completes the task.
+No human needed.
 
 ---
 
 ## Quick Start
 
-### 1. Get a Free AI API Key
+### Step 1 — Install Python 3.12
+Download from: https://www.python.org/downloads/release/python-31210/
+Check "Add Python to PATH" during install.
 
-Choose any one of these free options:
+### Step 2 — Install Ollama (Free Local AI)
+Download from: https://ollama.com
+Then run:
+```bash
+ollama pull llama3.2
+ollama serve
+```
 
-| Provider | Free Tier | Get Key |
-|---|---|---|
-| Google Gemini | 1500 req/day | aistudio.google.com |
-| Groq | High limits | console.groq.com |
-| NVIDIA NIM | Free credits | build.nvidia.com |
+### Step 3 — Install & Configure NAYAK
+**Windows:**
+1. Clone the repository and navigate inside.
+2. Double click `setup.bat` to install everything automatically.
+3. Open `.env` and configure your API keys if needed (Ollama works without keys!).
 
-### 2. Install NAYAK
+**Mac/Linux:**
 ```bash
 git clone https://github.com/nayak-engine/nayak.git
 cd nayak
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
 playwright install chromium
-```
-
-### 3. Configure Your API Key
-```bash
 cp .env.example .env
 ```
 
-Open .env and paste your API key.
-
-### 4. Run Your First Agent
+### Step 4 — Run Your First Agent
+**Windows:** Double click `nayak.bat` or run:
 ```bash
-nayak run --goal "Search for the top 3 AI robotics companies and save a report to report.md"
+nayak run "Search for the top 3 AI robotics companies and save a report to report.md"
 ```
 
-Watch NAYAK open a real browser, search the web, 
-read websites, and save a real report. Fully autonomous.
+**Mac/Linux:**
+```bash
+nayak run "Search for the top 3 AI robotics companies and save a report to report.md"
+```
+
+Watch NAYAK open a real browser, search the web, read websites, and save a real report. Fully autonomous.
 
 ---
 
 ## How It Works
 
-NAYAK uses a Plan-Then-Execute architecture:
+NAYAK uses a perceive → think → act → remember loop:
 
-1. PLAN — AI creates a full action plan for the goal
-2. EXECUTE — NAYAK executes every action in the browser
-3. REMEMBER — Every result saved to persistent memory
-4. REPORT — AI compiles all findings into final output
+1. **SEE** — Captures the current browser state
+2. **THINK** — AI decides the next best action toward the goal
+3. **ACT** — Executes real browser actions (navigate, click, type, extract, save)
+4. **REMEMBER** — Every result is saved to persistent SQLite memory
 
-This uses only 3-5 AI API calls per task — 
-works perfectly on any free tier.
-
----
-
-## Architecture
-
----
-
-## Bring Your Own AI
-
-NAYAK works with any AI provider:
-```python
-from nayak import Agent
-
-agent = Agent(
-    goal="Your goal here",
-    api_key="your_key_here",
-    provider="gemini"  # or groq, nvidia, openai, anthropic
-)
-
-agent.run()
-```
-
----
-
-## Roadmap
-
-- [x] Autonomous web browsing agent
-- [x] Persistent memory
-- [x] Plan-then-execute architecture
-- [x] Multiple AI provider support
-- [ ] Physical robot support
-- [ ] Multi-agent coordination
-- [ ] Vision models integration
-- [ ] Mobile device control
-
----
-
-## Contributing
-
-NAYAK is built in the open by the community.
-Read CONTRIBUTING.md to get started.
+A final markdown report is always saved before exit.
 
 ---
 
 ## License
 
 Apache License 2.0 — Free forever.
-
----
 
 *NAYAK — Built in the open. For the world.*

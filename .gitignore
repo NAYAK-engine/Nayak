@@ -209,6 +209,10 @@ __marimo__/
 # NAYAK Specific Ignores
 .env
 .venv
+.venv/
+!*.bat
+!setup.bat
+!nayak.bat
 __pycache__
 *.pyc
 *.db

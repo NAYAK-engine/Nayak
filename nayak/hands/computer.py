@@ -29,6 +29,11 @@ class Computer:
         self._page = page
         self._timeout = timeout_ms
 
+    @property
+    def page(self) -> Page:
+        """Expose the underlying Playwright Page (used by agent for direct key presses)."""
+        return self._page
+
     # ------------------------------------------------------------------
     # Navigation
     # ------------------------------------------------------------------
@@ -50,35 +55,57 @@ class Computer:
             return f"Navigation error: {exc}"
 
     # ------------------------------------------------------------------
-    # Clicking
+    # Clicking — FIX 4: Four-strategy reliable click
     # ------------------------------------------------------------------
 
     async def click(self, selector: str) -> str:
-        """Click an element by CSS selector with aria-label / text fallbacks."""
+        """
+        Click an element using four progressively softer strategies:
+        1. Direct CSS selector click (strict, fast)
+        2. wait_for_selector then element.click()
+        3. get_by_text match (useful when selector looks like label text)
+        4. JavaScript evaluate click (last resort, no-op safe)
+        """
+        # Strategy 1: direct CSS selector click
         try:
-            await self._page.wait_for_selector(selector, timeout=self._timeout)
-            await self._page.click(selector, timeout=self._timeout)
-            logger.info("Clicked selector: %s", selector)
+            await self._page.click(selector, timeout=3_000)
+            await asyncio.sleep(1)
+            logger.info("Clicked (strategy 1 — direct): %s", selector)
             return f"Clicked '{selector}'"
-        except PlaywrightTimeoutError:
-            # Fallback 1: aria-label
-            try:
-                await self._page.get_by_label(selector).click(timeout=self._timeout)
-                return f"Clicked aria-label '{selector}'"
-            except Exception:
-                pass
-            # Fallback 2: visible text
-            try:
-                await self._page.get_by_text(selector, exact=False).first.click(
-                    timeout=self._timeout
-                )
-                return f"Clicked visible text '{selector}'"
-            except Exception:
-                pass
-            return f"Element '{selector}' not found for click"
+        except Exception:
+            pass
+
+        # Strategy 2: wait_for_selector then locator.click()
+        try:
+            el = await self._page.wait_for_selector(selector, timeout=3_000)
+            if el:
+                await el.click()
+                await asyncio.sleep(1)
+                logger.info("Clicked (strategy 2 — wait+click): %s", selector)
+                return f"Clicked '{selector}' (waited for element)"
+        except Exception:
+            pass
+
+        # Strategy 3: get_by_text — handy when the selector is human-readable text
+        try:
+            await self._page.get_by_text(selector).first.click()
+            await asyncio.sleep(1)
+            logger.info("Clicked (strategy 3 — by text): %s", selector)
+            return f"Clicked visible text '{selector}'"
+        except Exception:
+            pass
+
+        # Strategy 4: JavaScript evaluate click
+        try:
+            await self._page.evaluate(
+                f"document.querySelector('{selector}')?.click()"
+            )
+            await asyncio.sleep(1)
+            logger.info("Clicked (strategy 4 — JS eval): %s", selector)
+            return f"Clicked '{selector}' via JavaScript"
         except Exception as exc:
-            logger.error("click(%s) error: %s", selector, exc)
-            return f"Click error: {exc}"
+            logger.error("click(%s) all strategies exhausted: %s", selector, exc)
+            return f"Could not click: {selector}"
 
     async def click_coordinates(self, x: int, y: int) -> str:
         """Click at pixel coordinates (x, y)."""
@@ -130,11 +157,54 @@ class Computer:
             return f"Scroll error: {exc}"
 
     # ------------------------------------------------------------------
-    # Content extraction
+    # Content extraction — FIX 5: clean extract() method
     # ------------------------------------------------------------------
 
+    async def extract(self) -> str:
+        """
+        Extract clean, useful text from the current page.
+
+        Removes noise elements (scripts, styles, nav, footer, cookie banners,
+        ads) before capturing inner text, then filters short/blank lines and
+        caps output at 6 000 characters.
+        """
+        try:
+            # Strip noisy elements from the live DOM
+            await self._page.evaluate(
+                """
+                document.querySelectorAll(
+                    'script, style, nav, footer, ' +
+                    '.cookie-banner, .advertisement, ' +
+                    '[class*="cookie"], [class*="banner"], ' +
+                    '[id*="cookie"], [id*="ad"]'
+                ).forEach(el => el.remove())
+                """
+            )
+
+            # Grab body text after cleaning
+            content = await self._page.inner_text("body")
+
+            # Filter empty / very short lines
+            lines = [
+                line.strip()
+                for line in content.split("\n")
+                if line.strip() and len(line.strip()) > 20
+            ]
+            clean = "\n".join(lines)
+
+            logger.info("extract() → %d chars (cleaned)", len(clean))
+            return clean[:6_000]
+
+        except Exception as exc:
+            logger.error("extract() error: %s", exc)
+            return f"Extract failed: {exc}"
+
     async def extract_text(self) -> str:
-        """Return full visible text of the current page."""
+        """
+        Legacy alias — returns full visible text without stripping noise.
+
+        Prefer extract() for new code.
+        """
         try:
             text: str = await self._page.evaluate(
                 "() => document.body.innerText"
@@ -168,27 +238,55 @@ class Computer:
             logger.info("Saved '%s' (%.1f KB)", path, size_kb)
             return f"Saved {size_kb:.1f} KB → '{path}'"
         except Exception as exc:
-            logger.error("save_file() error: %s", exc)
+            logger.error("save_file(%s) error: %s", filename, exc)
             return f"save_file error: {exc}"
 
     # ------------------------------------------------------------------
-    # Specialized Flows
+    # Specialized Flows — FIX 3: Reliable Google search
     # ------------------------------------------------------------------
 
     async def google_search(self, query: str) -> str:
-        """Perform a rigid Google search flow."""
+        """
+        Navigate to Google and perform a search, returning up to 5 000 chars
+        of results page body text.
+
+        Tries three input selectors in priority order so it works even when
+        Google serves the textarea vs input variant.
+        """
         try:
             await self.navigate("https://www.google.com")
             await asyncio.sleep(2)
-            await self.type_text("textarea[name='q']", query)
-            await asyncio.sleep(1)
-            await self.press_key("Enter")
+
+            # Try search-box selectors in order of preference
+            selectors = [
+                "textarea[name='q']",
+                "input[name='q']",
+                "input[type='search']",
+            ]
+
+            typed = False
+            for sel in selectors:
+                try:
+                    await self._page.wait_for_selector(sel, timeout=3_000)
+                    await self._page.fill(sel, query)
+                    typed = True
+                    logger.info("Filled search box (%s) with: %s", sel, query)
+                    break
+                except Exception:
+                    continue
+
+            if not typed:
+                logger.error("google_search: no search box found for query: %s", query)
+                return "Search box not found — could not perform Google search"
+
+            await self._page.keyboard.press("Enter")
             await asyncio.sleep(3)
-            return f"Searched Google for: {query}"
-        except Exception as exc:
-            logger.error("google_search() error: %s", exc)
-            return f"Google search error: {exc}"
+
+            # Return extracted results page text (up to 5 000 chars)
+            content = await self._page.inner_text("body")
+            logger.info("google_search('%s') → %d chars returned", query, len(content))
+            return content[:5_000]
 
         except Exception as exc:
-            logger.error("save_file(%s) error: %s", filename, exc)
-            return f"save_file error: {exc}"
+            logger.error("google_search() error: %s", exc)
+            return f"Search failed: {exc}"

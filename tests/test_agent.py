@@ -1,19 +1,19 @@
 """
 tests/test_agent.py — Production pytest test suite for the NAYAK engine.
 
-Tests for Groq API integration (OpenAI-compatible).
+Tests cover: MemoryStore, Action/ActionType parsing, Agent config.
+Brain provider tests use mocks so no real API key is needed.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nayak.agent import Agent, AgentConfig
-from nayak.brain.groq import Action, ActionType, Brain
+from nayak.brain import Action, ActionType
 from nayak.memory.store import MemoryStore
 
 
@@ -52,98 +52,79 @@ class TestMemoryStore:
         assert "NAVIGATE" in entries[0]
         assert "Navigated OK" in entries[0]
 
+    async def test_get_visited_urls(self, store: MemoryStore):
+        await store.save(
+            step=1,
+            action="[NAVIGATE] url='https://example.com'",
+            result="Navigated to https://example.com — HTTP 200",
+            goal="test",
+        )
+        urls = await store.get_visited_urls()
+        assert len(urls) == 1
+        assert "example.com" in urls[0]
+
 
 # ---------------------------------------------------------------------------
-# Action tests
+# Action / ActionType tests
 # ---------------------------------------------------------------------------
 
 class TestAction:
     def test_action_from_dict_navigate(self):
-        data = {"type": "navigate", "params": {"url": "https://a.com"}, "reason": "r"}
+        data = {"type": "navigate", "params": {"url": "https://a.com"}}
         action = Action.from_dict(data)
         assert action.type == ActionType.NAVIGATE
         assert action.url == "https://a.com"
 
     def test_action_from_dict_click_selector(self):
-        data = {"type": "click", "params": {"selector": "#b"}, "reason": "r"}
+        data = {"type": "click", "params": {"selector": "#b"}}
         action = Action.from_dict(data)
         assert action.type == ActionType.CLICK
         assert action.selector == "#b"
 
     def test_action_from_dict_click_coords(self):
-        data = {"type": "click", "params": {"x": 100, "y": 200}, "reason": "r"}
+        data = {"type": "click", "params": {"x": 100, "y": 200}}
         action = Action.from_dict(data)
         assert action.coordinates == (100, 200)
 
     def test_action_from_dict_type_text(self):
-        data = {"type": "type_text", "params": {"selector": "input", "text": "hi"}, "reason": "r"}
+        data = {"type": "type_text", "params": {"selector": "input", "text": "hi"}}
         action = Action.from_dict(data)
         assert action.type == ActionType.TYPE_TEXT
         assert action.text == "hi"
 
     def test_all_action_types_parseable(self):
         for t in ActionType:
-            data = {"type": t.value, "params": {}, "reason": "r"}
+            data = {"type": t.value, "params": {}}
             action = Action.from_dict(data)
             assert action.type == t
 
+    def test_unknown_type_returns_finish(self):
+        data = {"type": "teleport", "params": {}}
+        action = Action.from_dict(data)
+        assert action.type == ActionType.FINISH
 
-# ---------------------------------------------------------------------------
-# Brain tests (Mocked OpenAI)
-# ---------------------------------------------------------------------------
-
-class TestBrain:
-    def _make_mock_response(self, content: str) -> MagicMock:
-        response = MagicMock()
-        choice = MagicMock()
-        choice.message.content = content
-        response.choices = [choice]
-        return response
-
-    @patch("nayak.brain.groq.OpenAI")
-    def test_decide_returns_action(self, mock_openai_class):
-        mock_client = MagicMock()
-        mock_openai_class.return_value = mock_client
-        mock_client.chat.completions.create.return_value = self._make_mock_response(
-            '{"type": "navigate", "params": {"url": "https://x.com"}, "reason": "go"}'
-        )
-
-        brain = Brain(api_key="fake-key")
-        action = brain.decide("goal", 1, "url", "title", "text", "mem")
-        assert action.type == ActionType.NAVIGATE
-        assert action.url == "https://x.com"
-
-    @patch("nayak.brain.groq.OpenAI")
-    def test_decide_retries_on_error(self, mock_openai_class):
-        mock_client = MagicMock()
-        mock_openai_class.return_value = mock_client
-        good_response = self._make_mock_response('{"type": "finish", "reason": "done"}')
-        mock_client.chat.completions.create.side_effect = [
-            Exception("429 Rate Limit"),
-            good_response,
-        ]
-
-        brain = Brain(api_key="fake-key", retry_delay=0.0)
-        with patch("time.sleep"):
-            action = brain.decide("goal", 1, "url", "title", "text", "mem")
+    def test_non_dict_returns_finish(self):
+        action = Action.from_dict("not a dict")
         assert action.type == ActionType.FINISH
 
 
 # ---------------------------------------------------------------------------
-# Agent tests
+# AgentConfig tests
 # ---------------------------------------------------------------------------
 
-class TestAgent:
-    def _make_agent(self, tmp_path: Path) -> Agent:
-        config = AgentConfig(
-            goal="test",
-            agent_id="test",
-            groq_api_key="fake",
-            db_path=str(tmp_path / "test.db"),
-        )
-        return Agent.__new__(Agent) # Partial mock
-
-    async def test_agent_config(self):
-        config = AgentConfig(goal="g", groq_api_key="k")
+class TestAgentConfig:
+    def test_defaults_filled(self):
+        config = AgentConfig(goal="test goal")
         assert config.agent_id == "nayak-agent"
-        assert len(config.session_id) == 36
+        assert len(config.session_id) == 36   # UUID4
+
+    def test_custom_values(self):
+        config = AgentConfig(
+            goal="g",
+            agent_id="my-bot",
+            max_steps=50,
+            headless=False,
+        )
+        assert config.agent_id == "my-bot"
+        assert config.max_steps == 50
+        assert config.headless is False
