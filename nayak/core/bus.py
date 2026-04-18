@@ -50,17 +50,19 @@ class EventType(Enum):
     are unaffected.
     """
 
-    AGENT_STARTED    = auto()  # Agent.run() entered
-    AGENT_STOPPED    = auto()  # Agent fully shut down (finally block)
-    STEP_STARTED     = auto()  # A new perceive-think-act-remember cycle began
-    STEP_COMPLETED   = auto()  # A step finished successfully
-    STEP_FAILED      = auto()  # A step timed out or raised an error
-    ACTION_TAKEN     = auto()  # An action was executed by Computer
-    MEMORY_SAVED     = auto()  # A step was persisted to the memory store
-    GOAL_COMPLETED   = auto()  # ActionType.FINISH was returned
-    ERROR_OCCURRED   = auto()  # Any unexpected error in any component
-    PERCEPTION_READY = auto()  # _perceive() finished; PageState available
-    COGNITION_READY  = auto()  # _think() finished; Action chosen
+    AGENT_STARTED        = auto()  # Agent.run() entered
+    AGENT_STOPPED        = auto()  # Agent fully shut down (finally block)
+    STEP_STARTED         = auto()  # A new perceive-think-act-remember cycle began
+    STEP_COMPLETED       = auto()  # A step finished successfully
+    STEP_FAILED          = auto()  # A step timed out or raised an error
+    ACTION_TAKEN         = auto()  # An action was executed by Computer
+    MEMORY_SAVED         = auto()  # A step was persisted to the memory store
+    GOAL_COMPLETED       = auto()  # ActionType.FINISH was returned
+    ERROR_OCCURRED       = auto()  # Any unexpected error in any component
+    PERCEPTION_READY     = auto()  # _perceive() finished; PageState available
+    COGNITION_READY      = auto()  # _think() finished; Action chosen
+    MODULE_REGISTERED    = auto()  # A NayakModule was added to the ModuleRegistry
+    MODULE_UNREGISTERED  = auto()  # A NayakModule was removed from the ModuleRegistry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
