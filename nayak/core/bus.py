@@ -61,6 +61,7 @@ class EventType(Enum):
     ERROR_OCCURRED       = auto()  # Any unexpected error in any component
     PERCEPTION_READY     = auto()  # _perceive() finished; PageState available
     COGNITION_READY      = auto()  # _think() finished; Action chosen
+    ACTION_READY         = auto()  # Action backend initialized and ready
     MEMORY_READY         = auto()  # Memory backend initialized and ready 
     MODULE_REGISTERED    = auto()  # A NayakModule was added to the ModuleRegistry
     MODULE_UNREGISTERED  = auto()  # A NayakModule was removed from the ModuleRegistry

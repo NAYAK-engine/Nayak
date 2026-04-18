@@ -12,12 +12,14 @@ from pathlib import Path
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from nayak.action.base import ActionBase
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 8_000   # ms to wait for elements
 
 
-class Computer:
+class Computer(ActionBase):
     """
     Execution engine wrapping a Playwright Page.
 
@@ -28,6 +30,19 @@ class Computer:
     def __init__(self, page: Page, timeout_ms: int = _DEFAULT_TIMEOUT) -> None:
         self._page = page
         self._timeout = timeout_ms
+
+    @property
+    def name(self) -> str:
+        return "browser-action"
+
+    async def init(self) -> None:
+        """Initialize and register with NAYAK runtime."""
+        await self.register()
+
+    async def stop(self) -> None:
+        """Stop and unregister from NAYAK runtime."""
+        from nayak.core import registry, ModuleStatus
+        registry.set_status(self.name, ModuleStatus.STOPPED)
 
     @property
     def page(self) -> Page:
