@@ -19,6 +19,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from nayak.perception.base import PerceptionBase
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +41,7 @@ class PageState:
         return f"PageState({ok} url={self.url!r} title={self.title!r} text={snippet!r}…)"
 
 
-class Browser:
+class Browser(PerceptionBase):
     """
     Async Playwright wrapper used by the agent as its 'eyes'.
 
@@ -58,6 +60,10 @@ class Browser:
         "Chrome/124.0.0.0 Safari/537.36"
     )
 
+    @property
+    def name(self) -> str:
+        return "browser-perception"
+
     def __init__(self, headless: bool = True) -> None:
         self._headless = headless
         self._playwright: Playwright | None = None
@@ -68,6 +74,10 @@ class Browser:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    async def init(self) -> None:
+        """Initialize perception — calls start()."""
+        await self.start()
 
     async def start(self) -> None:
         """Launch Chromium and open a blank page."""
@@ -82,9 +92,13 @@ class Browser:
         )
         self._page = await self._context.new_page()
         logger.info("Browser started (headless=%s)", self._headless)
+        await self.register()
 
     async def stop(self) -> None:
         """Gracefully shut down browser and Playwright."""
+        from nayak.core import registry, ModuleStatus
+        registry.set_status(self.name, ModuleStatus.STOPPED)
+        
         if self._page and not self._page.is_closed():
             await self._page.close()
         if self._context:
