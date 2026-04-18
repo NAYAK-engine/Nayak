@@ -32,6 +32,28 @@ load_dotenv()  # Load .env file if present
 logger = logging.getLogger(__name__)
 console = Console()
 
+
+def _setup_file_logging() -> None:
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "nayak.log")
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+
+
+_setup_file_logging()
+
 # ──────────────────────────────────────────────────────────────────
 # PROVIDER
 # ──────────────────────────────────────────────────────────────────
@@ -115,10 +137,12 @@ class Agent:
         try:
             return await self._run_loop()
         except KeyboardInterrupt:
+            logger.warning("Agent stopped by user (KeyboardInterrupt)")
             console.print("\n[NAYAK] Stopped by user.")
             await self._force_save_report()
             return "Stopped by user"
         except Exception as e:
+            logger.error("Unhandled exception in agent run loop: %s", e)
             console.print(f"\n[NAYAK] Unexpected error: {e}")
             logger.exception("Unhandled exception in agent run loop")
             await self._force_save_report()
@@ -126,6 +150,7 @@ class Agent:
         finally:
             await self._browser.stop()
             await self._memory.close()
+            logger.info("Agent shutdown complete")
             console.print("[NAYAK] Agent shutdown complete.")
 
     async def _run_loop(self) -> str:
@@ -138,6 +163,7 @@ class Agent:
 
             # FIX 2 — Hard stop at < 10 steps: save immediately and exit
             if steps_remaining < 10:
+                logger.warning("Less than 10 steps remaining — saving and exiting (step %d)", self._step)
                 console.print(
                     "[bold red][NAYAK] Less than 10 steps remaining. "
                     "Saving report and exiting.[/bold red]"
@@ -147,26 +173,25 @@ class Agent:
 
             # FIX 2 — Soft warning at < 20 steps
             if steps_remaining < 20:
+                logger.warning("Less than 20 steps remaining — prioritising extraction (step %d)", self._step)
                 console.print(
                     "[yellow][NAYAK] Less than 20 steps remaining. "
                     "Prioritising extraction.[/yellow]"
                 )
 
+            logger.info("--- Step %d / %d ---", self._step, self.config.max_steps)
             console.rule(
                 f"[bold cyan]Step {self._step} / {self.config.max_steps}[/bold cyan]"
             )
 
-            # 1. PERCEIVE
-            state = await self._perceive()
-
-            # 2. THINK
-            action = await self._think(state)
-
-            # 3. ACT
-            result = await self._act(action)
-
-            # 4. REMEMBER
-            await self._remember(action, result)
+            # PERCEIVE → THINK → ACT → REMEMBER (120s per-step timeout)
+            try:
+                action = await asyncio.wait_for(self._run_step(), timeout=120)
+            except asyncio.TimeoutError:
+                logger.warning("Step %d timed out after 120s", self._step)
+                console.print("[bold red][NAYAK] Step timed out. Skipping.[/bold red]")
+                self._failure_count += 1
+                continue
 
             if action.type == ActionType.FINISH:
                 self._done = True
@@ -179,11 +204,32 @@ class Agent:
                 f"Reached max steps ({self.config.max_steps}) "
                 "without completing the goal."
             )
+            logger.warning(msg)
             console.print(f"\n[yellow][WARNING] {msg}[/yellow]")
             await self._force_save_report()
             return msg
 
         return "Agent finished."
+
+    # ------------------------------------------------------------------
+    # Step runner (used by _run_loop with timeout)
+    # ------------------------------------------------------------------
+
+    async def _run_step(self) -> Action:
+        """Run one perceive → think → act → remember cycle. Returns the action."""
+        # 1. PERCEIVE
+        state = await self._perceive()
+
+        # 2. THINK
+        action = await self._think(state)
+
+        # 3. ACT
+        result = await self._act_with_retry(action)
+
+        # 4. REMEMBER
+        await self._remember(action, result)
+
+        return action
 
     # ------------------------------------------------------------------
     # Loop phases
@@ -192,6 +238,7 @@ class Agent:
     async def _perceive(self) -> PageState:
         """Capture current browser state."""
         state = await self._browser.see()
+        logger.info("[SEE] url=%s title=%r", state.url[:80], state.title[:50])
         console.print(
             f"[bold][SEE][/bold] [green]OK[/green] | "
             f"[link={state.url}]{state.url[:80]}[/link] | "
@@ -203,6 +250,7 @@ class Agent:
         """Ask the brain for the next action."""
         memory_context = await self._memory.get_recent(n=15)
         context_str = "\n".join(memory_context) if memory_context else "(no prior memory)"
+        logger.info("[THINK] step=%d memory_entries=%d", self._step, len(memory_context))
         console.print(
             f"[dim][THINK] Thinking... ({len(memory_context)} memory entries)[/dim]"
         )
@@ -221,6 +269,7 @@ class Agent:
         current_url = state.url
         visit_count = self._url_visit_counts[current_url]
         if visit_count >= 3:
+            logger.warning("URL visited %d times already: %s", visit_count, current_url)
             console.print(
                 f"[bold red][NAYAK] Already visited {current_url} "
                 f"{visit_count} times. Nudging agent to skip.[/bold red]"
@@ -232,6 +281,7 @@ class Agent:
 
         # FIX 2 — Stuck-action detection
         if self._failure_count >= 3:
+            logger.warning("Stuck action '%s' — skipping after 3 failures", self._last_action_type)
             console.print(
                 f"[NAYAK] Skipping stuck action '{self._last_action_type}' "
                 "after 3 failures"
@@ -255,6 +305,7 @@ class Agent:
             screenshot_b64=state.screenshot_b64,
             memory_context=context_str,
         )
+        logger.info("[ACTION] %s", action)
         console.print(
             Panel(
                 str(action),
@@ -314,6 +365,7 @@ class Agent:
                     content=action.text or "",
                 )
                 if not ("failed" in result.lower() or "error" in result.lower()):
+                    logger.info("File saved: %s — task complete", action.filename or "output.txt")
                     console.print("[NAYAK] File saved. Task complete.")
                     self._done = True
 
@@ -353,8 +405,37 @@ class Agent:
 
         self._last_action_type = action.type
 
+        if is_failure:
+            logger.warning("[RESULT] action=%s result=%s", action.type.value, result)
+        else:
+            logger.info("[RESULT] action=%s result=%s", action.type.value, result)
         console.print(f"[bold blue]Result:[/bold blue] {result}")
         await asyncio.sleep(0.8)
+        return result
+
+    async def _act_with_retry(self, action: Action) -> str:
+        """Execute an action with up to 3 retries on failure."""
+        _no_retry_types = {ActionType.FINISH, ActionType.SAVE_FILE}
+        _failure_keywords = ("failed", "error", "timeout", "not found", "could not")
+
+        if action.type in _no_retry_types:
+            return await self._act(action)
+
+        result = ""
+        for attempt in range(1, 4):
+            result = await self._act(action)
+            if not any(k in result.lower() for k in _failure_keywords):
+                return result
+            if attempt < 3:
+                logger.warning(
+                    "[NAYAK] Action '%s' failed (attempt %d/3): %s — retrying in 1s",
+                    action.type.value, attempt, result,
+                )
+                await asyncio.sleep(1)
+        logger.warning(
+            "[NAYAK] Action '%s' failed after 3 attempts. Last result: %s",
+            action.type.value, result,
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -369,11 +450,13 @@ class Agent:
         unhandled exception, and max_steps reached.
         """
         if not self.extracted_content:
+            logger.warning("No content extracted — skipping report save")
             console.print("[NAYAK] No content extracted yet — skipping report save.")
             return False
 
         combined = "\n\n".join(self.extracted_content)
         if len(combined) < 100:
+            logger.warning("Extracted content too short (%d chars) — skipping report", len(combined))
             console.print("[NAYAK] Extracted content too short — skipping report.")
             return False
 
@@ -393,6 +476,7 @@ Use headers, bullet points, and sections.
             filename = "report.md"
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(report)
+            logger.info("Report saved to %s", filename)
             console.print(f"[bold green][NAYAK] Report saved to {filename}[/bold green]")
             return True
         except Exception as e:
