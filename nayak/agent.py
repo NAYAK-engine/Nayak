@@ -23,6 +23,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from nayak.brain import Action, ActionType
+from nayak.core import bus, EventType, NayakEvent
 from nayak.eyes.browser import Browser, PageState
 from nayak.hands.computer import Computer
 from nayak.memory.store import MemoryStore
@@ -131,6 +132,11 @@ class Agent:
         """
         self._print_banner()
         await self._memory.init()
+        await bus.emit(NayakEvent(
+            type=EventType.AGENT_STARTED,
+            payload={"goal": self.config.goal, "session_id": self.config.session_id},
+            source="agent",
+        ))
         await self._browser.start()
         self._computer = Computer(self._browser.page)
 
@@ -145,9 +151,15 @@ class Agent:
             logger.error("Unhandled exception in agent run loop: %s", e)
             console.print(f"\n[NAYAK] Unexpected error: {e}")
             logger.exception("Unhandled exception in agent run loop")
+            await bus.emit_error(source="agent", error=str(e))
             await self._force_save_report()
             return f"Error: {e}"
         finally:
+            await bus.emit(NayakEvent(
+                type=EventType.AGENT_STOPPED,
+                payload={"steps": self._step, "session_id": self.config.session_id},
+                source="agent",
+            ))
             await self._browser.stop()
             await self._memory.close()
             logger.info("Agent shutdown complete")
@@ -160,6 +172,11 @@ class Agent:
         while self._step < self.config.max_steps and not self._done:
             self._step += 1
             steps_remaining = self.config.max_steps - self._step
+            await bus.emit(NayakEvent(
+                type=EventType.STEP_STARTED,
+                payload={"step": self._step, "max_steps": self.config.max_steps},
+                source="agent",
+            ))
 
             # FIX 2 — Hard stop at < 10 steps: save immediately and exit
             if steps_remaining < 10:
@@ -195,6 +212,11 @@ class Agent:
 
             if action.type == ActionType.FINISH:
                 self._done = True
+                await bus.emit(NayakEvent(
+                    type=EventType.GOAL_COMPLETED,
+                    payload={"goal": self.config.goal, "steps": self._step, "reason": action.reason},
+                    source="agent",
+                ))
                 await self._force_save_report()
                 self._print_finish(action.reason)
                 return action.reason
@@ -436,6 +458,11 @@ class Agent:
             "[NAYAK] Action '%s' failed after 3 attempts. Last result: %s",
             action.type.value, result,
         )
+        await bus.emit(NayakEvent(
+            type=EventType.STEP_FAILED,
+            payload={"step": self._step, "action_type": str(action.type), "result": result},
+            source="agent",
+        ))
         return result
 
     # ------------------------------------------------------------------
@@ -492,6 +519,11 @@ Use headers, bullet points, and sections.
             result=result,
             goal=self.config.goal,
         )
+        await bus.emit(NayakEvent(
+            type=EventType.STEP_COMPLETED,
+            payload={"step": self._step, "action_type": str(action.type)},
+            source="agent",
+        ))
 
     # ------------------------------------------------------------------
     # Console helpers
