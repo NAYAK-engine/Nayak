@@ -63,6 +63,10 @@ class EventType(Enum):
     COGNITION_READY      = auto()  # _think() finished; Action chosen
     MODULE_REGISTERED    = auto()  # A NayakModule was added to the ModuleRegistry
     MODULE_UNREGISTERED  = auto()  # A NayakModule was removed from the ModuleRegistry
+    RUNTIME_STARTING     = auto()  # NayakRuntime.start() entered
+    RUNTIME_READY        = auto()  # All modules initialised; runtime is operational
+    RUNTIME_STOPPING     = auto()  # NayakRuntime.stop() entered
+    RUNTIME_STOPPED      = auto()  # Runtime fully shut down
 
 
 # ─────────────────────────────────────────────────────────────────────────────
