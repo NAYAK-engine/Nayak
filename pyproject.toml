@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     # AI providers
     "openai>=1.50.0",          # NVIDIA NIM uses OpenAI-compatible API
+    "google-genai>=1.0.0",     # Google Gemini provider
     "httpx>=0.27.0",           # Ollama local uses httpx directly
     # Browser automation
     "playwright>=1.49.0",
