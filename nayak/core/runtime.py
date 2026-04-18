@@ -132,6 +132,9 @@ class NayakRuntime:
             source="runtime",
         ))
 
+        from nayak.core.loader import load_default_modules
+        await load_default_modules()
+
         if self.config.auto_load_modules:
             await self._init_modules_in_order()
 
