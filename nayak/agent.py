@@ -61,9 +61,13 @@ _setup_file_logging()
 PROVIDER = os.environ.get("NAYAK_PROVIDER", "ollama").lower()
 
 if PROVIDER == "gemini":
-    from nayak.brain.gemini import decide, generate, plan
+    from nayak.cognition.gemini import gemini_cognition as _cognition
 else:
-    from nayak.brain.ollama import decide, generate, plan
+    from nayak.cognition.ollama import ollama_cognition as _cognition
+
+plan = _cognition.plan
+decide = _cognition.decide
+generate = _cognition.generate
 
 
 @dataclass
