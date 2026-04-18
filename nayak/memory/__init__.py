@@ -1,5 +1,10 @@
-"""Memory module — persistent SQLite-backed episodic memory."""
+"""
+nayak.memory — NAYAK Layer 5: Memory Engine.
 
-from nayak.memory.store import MemoryStore, MemoryEntry
+Short term and long term memory for NAYAK agents.
+Agents remember everything. Agents never forget.
+"""
 
-__all__ = ["MemoryStore", "MemoryEntry"]
+from nayak.memory.store import MemoryStore
+
+__all__ = ["MemoryStore"]

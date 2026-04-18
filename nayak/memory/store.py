@@ -14,6 +14,8 @@ from typing import Any
 
 import aiosqlite
 
+from nayak.memory.base import MemoryBase
+
 logger = logging.getLogger(__name__)
 
 _DB_PATH = Path.home() / ".nayak" / "nayak_memory.db"
@@ -61,7 +63,7 @@ class MemoryEntry:
         return f"[Step {self.step} | {self.ts[:19]}] {self.action} → {self.result}"
 
 
-class MemoryStore:
+class MemoryStore(MemoryBase):
     """
     Async SQLite memory store.
 
@@ -74,6 +76,10 @@ class MemoryStore:
         urls  = await store.get_visited_urls(session_id="run-001")
         await store.close()
     """
+
+    @property
+    def name(self) -> str:
+        return "sqlite-memory"
 
     def __init__(
         self,
@@ -94,6 +100,7 @@ class MemoryStore:
         await self._conn.executescript(_DDL)
         await self._conn.commit()
         logger.debug("MemoryStore ready at %s", self._db_path)
+        await self.register()
 
     async def save(
         self,
@@ -184,3 +191,19 @@ class MemoryStore:
         if self._conn:
             await self._conn.close()
             self._conn = None
+
+    async def search(self, query: str) -> list[str]:
+        """Search memory for entries containing query string."""
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT action, result FROM memory WHERE action LIKE ? OR result LIKE ? ORDER BY step DESC LIMIT 20",
+                (f"%{query}%", f"%{query}%")
+            )
+            rows = await cursor.fetchall()
+            return [f"action: {r[0]} | result: {r[1]}" for r in rows]
+
+    async def clear(self) -> None:
+        """Clear all memory for this session."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM memory WHERE session_id = ?", (self._session_id,))
+            await db.commit()
