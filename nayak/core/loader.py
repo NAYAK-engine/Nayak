@@ -18,14 +18,23 @@ logger = logging.getLogger(__name__)
 async def load_default_modules() -> None:
     """Load and initialize default NAYAK modules by OS layer order.
 
+    - Layer 1 (HAL):       Loaded immediately — Raspberry Pi and Camera backends.
     - Layer 2 (Perception): Deferred. Handled per-agent session.
     - Layer 3 (Cognition): Loaded immediately based on NAYAK_PROVIDER.
-    - Layer 4 (Action): Deferred. Handled per-agent session.
-    - Layer 5 (Memory): Deferred. Handled per-agent session.
+    - Layer 4 (Action):    Deferred. Handled per-agent session.
+    - Layer 5 (Memory):    Deferred. Handled per-agent session.
 
     Logs the final registry summary upon completion.
     """
     logger.info("Initializing default NAYAK modules...")
+
+    # Layer 1 — HAL
+    from nayak.hal.raspberry_pi import raspberry_pi
+    from nayak.hal.camera import camera
+    logger.info("Layer 1: Booting HAL modules...")
+    await raspberry_pi.init()
+    await camera.init()
+    logger.info("Layer 1: HAL initialized")
 
     # Layer 2 — Perception
     logger.info("Layer 2: Perception engine ready for browser attachment")

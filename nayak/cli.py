@@ -21,6 +21,7 @@ from rich.table import Table
 
 from nayak.agent import Agent, AgentConfig
 from nayak.memory.store import MemoryStore
+from nayak.cognition.fastpath import fast_answer, classify_query, QueryComplexity
 
 load_dotenv()  # Load .env automatically
 
@@ -95,26 +96,49 @@ def calculate_steps(goal: str) -> int:
 @app.command()
 def run(goal: str):
     """Run NAYAK with your goal."""
-    steps = calculate_steps(goal)
-    print(f"[NAYAK] Goal received.")
-    print(f"[NAYAK] Complexity: {steps} steps allocated.")
-    print(f"[NAYAK] Starting now...")
-    
     if not _check_provider():
         raise typer.Exit(code=1)
 
-    config = AgentConfig(
-        goal=goal,
-        agent_id="nayak-agent",
-        max_steps=steps,
-        headless=True,
-        db_path=None,
-    )
-
     async def _run() -> None:
-        agent = Agent(config)
-        outcome = await agent.run()
-        console.print(f"\n[bold]Final outcome:[/bold] {outcome}")
+        # Boot runtime
+        from nayak.core.runtime import runtime
+        await runtime.start()
+
+        try:
+            # Determine provider
+            provider = os.environ.get("NAYAK_PROVIDER", "ollama").lower()
+            if provider == "gemini":
+                from nayak.cognition.gemini import gemini_cognition as cognition
+            else:
+                from nayak.cognition.ollama import ollama_cognition as cognition
+
+            # Try fast path first
+            complexity = await classify_query(goal)
+            console.print(f"[dim][NAYAK] Complexity: {complexity.value}[/dim]")
+
+            if complexity != QueryComplexity.COMPLEX:
+                console.print("[dim][NAYAK] Fast path activated...[/dim]")
+                answer = await fast_answer(goal, cognition)
+                if answer:
+                    console.print(f"\n[bold green]Answer:[/bold green] {answer}")
+                    return
+
+            # Full agent loop for complex goals
+            steps = calculate_steps(goal)
+            console.print(f"[dim][NAYAK] Full agent loop — {steps} steps[/dim]")
+            config = AgentConfig(
+                goal=goal,
+                agent_id="nayak-agent",
+                max_steps=steps,
+                headless=True,
+                db_path=None,
+            )
+            agent = Agent(config)
+            outcome = await agent.run()
+            console.print(f"\n[bold]Final outcome:[/bold] {outcome}")
+
+        finally:
+            await runtime.stop()
 
     asyncio.run(_run())
 
