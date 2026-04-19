@@ -86,6 +86,11 @@ class EventType(Enum):
     UPDATE_READY         = auto()  # An UpdateBase backend registered and is operational
     PACKAGE_INSTALLED    = auto()  # A new skill package or module update was installed
 
+    # SDK — Layer 9 developer platform events
+    SDK_READY            = auto()  # A DeveloperPlatformBase backend registered and is operational
+    SKILL_LOADED         = auto()  # A skill was successfully loaded into the runtime
+    SKILL_UNLOADED        = auto()  # A skill was removed from the runtime
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NayakEvent

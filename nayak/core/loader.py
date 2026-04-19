@@ -75,4 +75,10 @@ async def load_default_modules() -> None:
     await updater.init()
     logger.info("Layer 8: Update engine online")
 
+    # Layer 9 — Developer Platform
+    from nayak.sdk.platform import platform
+    logger.info("Layer 9: Booting developer platform...")
+    await platform.init()
+    logger.info("Layer 9: Developer platform online — ready for skills")
+
     logger.info("Default modules loaded.\n%s", registry.summary())
