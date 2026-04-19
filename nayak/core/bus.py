@@ -74,6 +74,10 @@ class EventType(Enum):
     HAL_READY            = auto()  # A HardwareBase backend registered and is operational
     DEVICE_DATA          = auto()  # A device produced a data reading (sensor/camera/etc.)
 
+    # COMM — Layer 6 communication events
+    COMM_READY           = auto()  # A CommunicationBase backend registered and is operational
+    MESSAGE_RECEIVED     = auto()  # The communication engine received an incoming message
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NayakEvent

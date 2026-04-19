@@ -27,6 +27,7 @@ from nayak.core import bus, EventType, NayakEvent
 from nayak.eyes.browser import Browser, PageState
 from nayak.hal.raspberry_pi import raspberry_pi
 from nayak.hal.camera import camera
+from nayak.communication.text import text_comm
 from nayak.hands.computer import Computer
 from nayak.memory.store import MemoryStore
 
@@ -129,6 +130,10 @@ class Agent:
     # Public interface
     # ------------------------------------------------------------------
 
+    async def tell(self, message: str) -> None:
+        """Send a message to NAYAK during a running session."""
+        await text_comm.hear(message, sender="human")
+
     async def run(self) -> str:
         """
         Execute the perceive -> think -> act -> remember loop.
@@ -164,6 +169,7 @@ class Agent:
         except Exception as e:
             logger.error("Unhandled exception in agent run loop: %s", e)
             console.print(f"\n[NAYAK] Unexpected error: {e}")
+            asyncio.create_task(text_comm.say(f"I encountered an error: {e}"))
             logger.exception("Unhandled exception in agent run loop")
             await bus.emit_error(source="agent", error=str(e))
             await self._force_save_report()
@@ -521,6 +527,7 @@ Use headers, bullet points, and sections.
                 f.write(report)
             logger.info("Report saved to %s", filename)
             console.print(f"[bold green][NAYAK] Report saved to {filename}[/bold green]")
+            asyncio.create_task(text_comm.say("Report saved. Task complete."))
             return True
         except Exception as e:
             logger.error("_force_save_report() failed: %s", e)
@@ -571,3 +578,4 @@ Use headers, bullet points, and sections.
                 padding=(1, 4),
             )
         )
+        asyncio.create_task(text_comm.say(reason))

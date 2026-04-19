@@ -57,4 +57,10 @@ async def load_default_modules() -> None:
     # Layer 5 — Memory
     logger.info("Layer 5: Memory engine initializes per agent session")
 
+    # Layer 6 — Communication
+    from nayak.communication.text import text_comm
+    logger.info("Layer 6: Booting text communication...")
+    await text_comm.init()
+    logger.info("Layer 6: Communication initialized")
+
     logger.info("Default modules loaded.\n%s", registry.summary())
