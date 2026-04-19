@@ -82,6 +82,10 @@ class EventType(Enum):
     SAFETY_READY         = auto()  # A SafetyBase backend registered and is operational
     SAFETY_VIOLATION     = auto()  # A safety violation occurred
 
+    # UPDATE — Layer 8 update engine events
+    UPDATE_READY         = auto()  # An UpdateBase backend registered and is operational
+    PACKAGE_INSTALLED    = auto()  # A new skill package or module update was installed
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NayakEvent

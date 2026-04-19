@@ -69,4 +69,10 @@ async def load_default_modules() -> None:
     await safety.init()
     logger.info("Layer 7: Safety engine online — all actions monitored")
 
+    # Layer 8 — Update Engine
+    from nayak.update.engine import updater
+    logger.info("Layer 8: Booting update engine...")
+    await updater.init()
+    logger.info("Layer 8: Update engine online")
+
     logger.info("Default modules loaded.\n%s", registry.summary())
