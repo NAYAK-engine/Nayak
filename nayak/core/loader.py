@@ -63,4 +63,10 @@ async def load_default_modules() -> None:
     await text_comm.init()
     logger.info("Layer 6: Communication initialized")
 
+    # Layer 7 — Safety
+    from nayak.safety.engine import safety
+    logger.info("Layer 7: Booting safety engine...")
+    await safety.init()
+    logger.info("Layer 7: Safety engine online — all actions monitored")
+
     logger.info("Default modules loaded.\n%s", registry.summary())

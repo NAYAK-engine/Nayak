@@ -78,6 +78,10 @@ class EventType(Enum):
     COMM_READY           = auto()  # A CommunicationBase backend registered and is operational
     MESSAGE_RECEIVED     = auto()  # The communication engine received an incoming message
 
+    # SAFETY — Layer 7 safety engine events
+    SAFETY_READY         = auto()  # A SafetyBase backend registered and is operational
+    SAFETY_VIOLATION     = auto()  # A safety violation occurred
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NayakEvent

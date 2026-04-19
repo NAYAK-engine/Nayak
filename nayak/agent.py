@@ -28,6 +28,8 @@ from nayak.eyes.browser import Browser, PageState
 from nayak.hal.raspberry_pi import raspberry_pi
 from nayak.hal.camera import camera
 from nayak.communication.text import text_comm
+from nayak.safety.engine import safety
+from nayak.safety.base import ThreatLevel
 from nayak.hands.computer import Computer
 from nayak.memory.store import MemoryStore
 
@@ -175,6 +177,8 @@ class Agent:
             await self._force_save_report()
             return f"Error: {e}"
         finally:
+            if safety.is_stopped:
+                await safety.resume()
             await bus.emit(NayakEvent(
                 type=EventType.AGENT_STOPPED,
                 payload={"steps": self._step, "session_id": self.config.session_id},
@@ -459,6 +463,18 @@ class Agent:
 
     async def _act_with_retry(self, action: Action) -> str:
         """Execute an action with up to 3 retries on failure."""
+        threat = await safety.check(
+            action_type=str(action.type),
+            payload={"url": getattr(action, "url", ""),
+                     "text": getattr(action, "text", ""),
+                     "selector": getattr(action, "selector", "")}
+        )
+        if threat == ThreatLevel.CRITICAL:
+            logger.critical("Action blocked by safety engine: %s", action.type)
+            return f"Action blocked by safety engine: {action.type}"
+        if threat == ThreatLevel.HIGH:
+            logger.warning("High threat action detected: %s", action.type)
+
         _no_retry_types = {ActionType.FINISH, ActionType.SAVE_FILE}
         _failure_keywords = ("failed", "error", "timeout", "not found", "could not")
 
