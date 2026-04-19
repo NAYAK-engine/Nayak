@@ -70,6 +70,10 @@ class EventType(Enum):
     RUNTIME_STOPPING     = auto()  # NayakRuntime.stop() entered
     RUNTIME_STOPPED      = auto()  # Runtime fully shut down
 
+    # HAL — Layer 1 hardware events
+    HAL_READY            = auto()  # A HardwareBase backend registered and is operational
+    DEVICE_DATA          = auto()  # A device produced a data reading (sensor/camera/etc.)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NayakEvent

@@ -25,6 +25,8 @@ from rich.text import Text
 from nayak.brain import Action, ActionType
 from nayak.core import bus, EventType, NayakEvent
 from nayak.eyes.browser import Browser, PageState
+from nayak.hal.raspberry_pi import raspberry_pi
+from nayak.hal.camera import camera
 from nayak.hands.computer import Computer
 from nayak.memory.store import MemoryStore
 
@@ -136,6 +138,14 @@ class Agent:
         """
         self._print_banner()
         await self._memory.init()
+
+        # Layer 1 — HAL
+        from nayak.hal.raspberry_pi import raspberry_pi
+        from nayak.hal.camera import camera
+        await raspberry_pi.init()
+        await camera.init()
+        logger.info("HAL engines initialized")
+
         await bus.emit(NayakEvent(
             type=EventType.AGENT_STARTED,
             payload={"goal": self.config.goal, "session_id": self.config.session_id},
@@ -164,6 +174,8 @@ class Agent:
                 payload={"steps": self._step, "session_id": self.config.session_id},
                 source="agent",
             ))
+            await camera.stop()
+            await raspberry_pi.stop()
             await self._browser.stop()
             await self._memory.close()
             logger.info("Agent shutdown complete")
