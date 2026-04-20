@@ -123,7 +123,15 @@ python -m nayak history
 
 When NAYAK starts, the runtime boots all 9 layers in order:
 
-
+```bash
+[L1] camera-hal         — READY  (Hardware abstraction backend)
+[L1] raspberry-pi-hal   — READY  (Hardware abstraction backend)
+[L3] cognition.ollama   — READY  (Cognition backend)
+[L6] text-communication — READY  (Communication backend)
+[L7] nayak-safety       — READY  (Safety engine)
+[L8] nayak-updater      — READY  (Update engine)
+[L9] nayak-platform     — READY  (Developer platform)
+```
 
 Every layer registers with the Module Registry.
 Every action flows through the Event Bus.
