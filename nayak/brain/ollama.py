@@ -131,22 +131,39 @@ async def decide(
     memory_context: str,
 ) -> Action:
     """Ask Ollama for the next browser action."""
-    prompt = f"""You are NAYAK, an autonomous web agent.
-Goal: {goal}
-Step: {step}
-Current URL: {url}
-Page Title: {page_title}
+    prompt = f"""You are NAYAK, an autonomous web research agent.
 
-Memory (recent steps):
+GOAL: {goal}
+CURRENT STEP: {step}
+CURRENT URL: {url}
+PAGE TITLE: {page_title}
+
+RECENT MEMORY:
 {memory_context}
 
-Page Content (first 5000 chars):
+PAGE CONTENT:
 {page_text[:5000]}
 
-Return ONLY a JSON action object — no explanation, no markdown fences.
-Example: {{"type": "navigate", "params": {{"url": "https://example.com"}}}}
-Available actions: navigate, click, type_text, press_key, scroll, extract, save_file, search, finish
-"""
+STRICT RULES — YOU MUST FOLLOW THESE:
+1. You MUST search and browse the web to complete the goal.
+2. NEVER use "finish" unless you have extracted real content that answers the goal.
+3. NEVER use "finish" in the first 5 steps.
+4. If you are on Google homepage, you MUST use "search" action immediately.
+5. After searching, NAVIGATE to real result URLs and EXTRACT content.
+6. Only use "finish" after you have used "extract" at least 3 times.
+7. Only use "save_file" after you have gathered enough real content.
+8. If page content is empty or unhelpful, navigate to a different URL.
+
+ACTION FORMAT — Return ONLY a single JSON object, no explanation, no markdown:
+{{"type": "search", "params": {{"text": "your search query"}}}}
+{{"type": "navigate", "params": {{"url": "https://example.com"}}}}
+{{"type": "click", "params": {{"selector": "css selector"}}}}
+{{"type": "extract", "params": {{}}}}
+{{"type": "save_file", "params": {{"filename": "report.md", "text": "content"}}}}
+{{"type": "finish", "params": {{"reason": "goal completed"}}}}
+
+What is your next action?"""
+
     raw = await _call(prompt)
     data = _parse_json_safely(raw)
     return Action.from_dict(data)
