@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NAYAK Studio</title>
+  <meta name="description" content="NAYAK OS real-time web dashboard." />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">⬡ NAYAK OS</div>
+      <div class="version-badge" id="version-badge">v0.2.0</div>
+    </div>
+    <div class="header-right">
+      <span class="uptime-label">Uptime</span>
+      <span class="uptime-value" id="uptime-display">—</span>
+      <div class="pulse-dot" id="runtime-pulse"></div>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- Module Registry -->
+    <section class="panel full-width">
+      <div class="panel-header">
+        <span class="panel-title">Module Registry</span>
+        <span class="panel-badge badge-blue" id="registry-count">0 modules</span>
+      </div>
+      <div class="panel-body">
+        <table class="registry-table">
+          <thead>
+            <tr><th>Layer</th><th>Module</th><th>Version</th><th>Status</th><th>Description</th></tr>
+          </thead>
+          <tbody id="registry-body">
+            <tr><td colspan="5"><div class="empty-state">Loading…</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Event Bus -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Event Bus</span>
+        <span class="panel-badge badge-purple" id="event-count">0 events</span>
+      </div>
+      <div class="panel-body">
+        <div class="event-feed" id="event-feed">
+          <div class="empty-state">Waiting for events…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Safety Engine -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Safety Engine</span>
+        <span class="panel-badge" id="safety-badge">—</span>
+      </div>
+      <div class="panel-body">
+        <div class="safety-status-bar safe" id="safety-status-bar">
+          <span class="safety-status-icon" id="safety-icon">🛡️</span>
+          <span class="safety-status-text" id="safety-text">SAFE</span>
+          <span class="safety-violations" id="safety-violations">0 violations</span>
+        </div>
+        <div class="safety-actions">
+          <button class="btn btn-danger" id="btn-stop" onclick="triggerStop()">⚠ Emergency Stop</button>
+          <button class="btn btn-success" id="btn-resume" onclick="triggerResume()">✓ Resume</button>
+        </div>
+        <div style="margin-top:14px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Capabilities</div>
+          <div id="capabilities-list" style="font-size:12px;color:var(--text-dim);line-height:2">—</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Skills -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Loaded Skills</span>
+        <span class="panel-badge badge-green" id="skills-count">0 skills</span>
+      </div>
+      <div class="panel-body">
+        <div class="skills-grid" id="skills-grid">
+          <div class="empty-state" style="grid-column:1/-1">No skills loaded</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quick Run -->
+    <section class="panel full-width">
+      <div class="panel-header">
+        <span class="panel-title">Quick Run</span>
+        <span class="panel-badge badge-blue">FastPath</span>
+      </div>
+      <div class="panel-body">
+        <div class="run-form">
+          <input class="run-input" id="run-input" type="text"
+            placeholder="Enter a goal — e.g. 'What is the price of Bitcoin?'"
+            onkeydown="if(event.key==='Enter') runGoal()" />
+          <button class="btn btn-primary" onclick="runGoal()">▶ Run</button>
+        </div>
+        <div class="run-result" id="run-result"></div>
+      </div>
+    </section>
+
+  </main>
+  <footer class="footer">NAYAK Studio — Auto-refreshing every <span>2s</span> · 9-Layer OS Architecture</footer>
+</div>
+<script>
+const API = '';
+
+function formatUptime(s) {
+  if (!s) return 'Offline';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+  return h > 0 ? `${h}h ${m}m ${sec}s` : m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function formatTs(unix) {
+  return new Date(unix * 1000).toLocaleTimeString('en-GB', {hour12: false});
+}
+
+function eventClass(type) {
+  if (type.startsWith('RUNTIME')) return 'runtime';
+  if (type.startsWith('SAFETY'))  return 'safety';
+  if (type.startsWith('SKILL'))   return 'skill';
+  return '';
+}
+
+async function fetchStatus() {
+  try {
+    const d = await (await fetch(`${API}/api/status`)).json();
+    document.getElementById('uptime-display').textContent = formatUptime(d.uptime);
+    document.getElementById('version-badge').textContent = `v${d.nayak_version}`;
+    document.getElementById('runtime-pulse').className =
+      'pulse-dot' + (d.runtime_running ? '' : ' offline');
+    const body = document.getElementById('registry-body');
+    document.getElementById('registry-count').textContent =
+      `${d.modules.length} module${d.modules.length!==1?'s':''}`;
+    if (!d.modules.length) {
+      body.innerHTML = `<tr><td colspan="5"><div class="empty-state">No modules</div></td></tr>`;
+      return;
+    }
+    body.innerHTML = d.modules.map(m => `
+      <tr>
+        <td><span class="layer-badge">${m.layer}</span></td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${m.name}</td>
+        <td style="color:var(--text-muted);font-size:12px">${m.version}</td>
+        <td><span class="status-pill status-${m.status}">${m.status}</span></td>
+        <td style="color:var(--text-muted);font-size:12px">${m.description||'—'}</td>
+      </tr>`).join('');
+  } catch(e) { console.warn('fetchStatus', e); }
+}
+
+async function fetchEvents() {
+  try {
+    const events = await (await fetch(`${API}/api/events`)).json();
+    const feed = document.getElementById('event-feed');
+    document.getElementById('event-count').textContent =
+      `${events.length} event${events.length!==1?'s':''}`;
+    if (!events.length) {
+      feed.innerHTML = `<div class="empty-state">Waiting for events…</div>`;
+      return;
+    }
+    feed.innerHTML = [...events].reverse().map(ev => `
+      <div class="event-item ${eventClass(ev.type)}">
+        <span class="event-type">${ev.type}</span>
+        <span class="event-source">${ev.source}</span>
+        <span class="event-ts">${formatTs(ev.timestamp)}</span>
+      </div>`).join('');
+  } catch(e) { console.warn('fetchEvents', e); }
+}
+
+async function fetchSafety() {
+  try {
+    const d = await (await fetch(`${API}/api/safety`)).json();
+    const bar  = document.getElementById('safety-status-bar');
+    const icon = document.getElementById('safety-icon');
+    const text = document.getElementById('safety-text');
+    const badge = document.getElementById('safety-badge');
+    const viols = document.getElementById('safety-violations');
+    const caps  = document.getElementById('capabilities-list');
+    if (d.is_stopped) {
+      bar.className = 'safety-status-bar stopped';
+      icon.textContent = '🚨'; text.textContent = 'EMERGENCY STOP';
+      badge.className = 'panel-badge badge-red'; badge.textContent = 'STOPPED';
+    } else {
+      bar.className = 'safety-status-bar safe';
+      icon.textContent = '🛡️'; text.textContent = 'SAFE';
+      badge.className = 'panel-badge badge-green'; badge.textContent = 'SAFE';
+    }
+    viols.textContent = `${d.violations} violation${d.violations!==1?'s':''}`;
+    caps.textContent = d.enabled_capabilities.length
+      ? d.enabled_capabilities.join(' · ') : 'None configured';
+  } catch(e) { console.warn('fetchSafety', e); }
+}
+
+async function fetchSkills() {
+  try {
+    const skills = await (await fetch(`${API}/api/skills`)).json();
+    const grid = document.getElementById('skills-grid');
+    document.getElementById('skills-count').textContent =
+      `${skills.length} skill${skills.length!==1?'s':''}`;
+    if (!skills.length) {
+      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">No skills loaded</div>`;
+      return;
+    }
+    grid.innerHTML = skills.map(s => `
+      <div class="skill-card">
+        <div class="skill-name">${s.name}</div>
+        <div class="skill-meta">by ${s.author} · v${s.version}</div>
+        <div class="skill-meta">${s.description}</div>
+        <span class="skill-type">${s.skill_type}</span>
+      </div>`).join('');
+  } catch(e) { console.warn('fetchSkills', e); }
+}
+
+async function triggerStop() {
+  document.getElementById('btn-stop').disabled = true;
+  try { await fetch(`${API}/api/safety/stop`, {method:'POST'}); await fetchSafety(); }
+  catch(e) { console.error(e); }
+  finally { document.getElementById('btn-stop').disabled = false; }
+}
+
+async function triggerResume() {
+  document.getElementById('btn-resume').disabled = true;
+  try { await fetch(`${API}/api/safety/resume`, {method:'POST'}); await fetchSafety(); }
+  catch(e) { console.error(e); }
+  finally { document.getElementById('btn-resume').disabled = false; }
+}
+
+async function runGoal() {
+  const input = document.getElementById('run-input');
+  const result = document.getElementById('run-result');
+  const goal = input.value.trim();
+  if (!goal) return;
+  result.className = 'run-result visible';
+  result.innerHTML = `<div class="shimmer"></div>`;
+  try {
+    const d = await (await fetch(`${API}/api/run`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({goal})
+    })).json();
+    const tag = `<span class="complexity-tag complexity-${d.complexity}">${d.complexity}</span>`;
+    if (d.error) {
+      result.innerHTML = `${tag}<div class="run-answer" style="color:var(--red)">${d.error}</div>`;
+    } else if (d.answer) {
+      result.innerHTML = `${tag}<div class="run-answer">${d.answer}</div>`;
+    } else {
+      result.innerHTML = `${tag}<div class="run-answer" style="color:var(--text-muted)">
+        Classified as <strong>${d.complexity}</strong> — requires full agent loop.<br/>
+        Run <code style="font-family:'JetBrains Mono',monospace">nayak run "${goal}"</code>
+      </div>`;
+    }
+  } catch(e) {
+    result.innerHTML = `<div class="run-answer" style="color:var(--red)">Request failed: ${e.message}</div>`;
+  }
+}
+
+async function refreshAll() {
+  await Promise.allSettled([fetchStatus(), fetchEvents(), fetchSafety(), fetchSkills()]);
+}
+
+refreshAll();
+setInterval(refreshAll, 2000);
+</script>
+</body>
+</html>

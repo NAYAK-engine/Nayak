@@ -233,5 +233,15 @@ def history(
     asyncio.run(_history())
 
 
+@app.command()
+def studio() -> None:
+    """Launch NAYAK Studio web dashboard at http://localhost:8000."""
+    import uvicorn
+    from nayak.studio.server import app as studio_app
+    console.print("[bold cyan]⬡ NAYAK Studio launching at http://localhost:8000[/bold cyan]")
+    console.print("[dim]Auto-refreshing dashboard — Ctrl+C to stop[/dim]")
+    uvicorn.run(studio_app, host="0.0.0.0", port=8000)
+
+
 if __name__ == "__main__":
     app()

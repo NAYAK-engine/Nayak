@@ -81,4 +81,15 @@ async def load_default_modules() -> None:
     await platform.init()
     logger.info("Layer 9: Developer platform online — ready for skills")
 
+    # ── Core Skills ───────────────────────────────────────────────────────
+    from nayak.skills.web_search_skill import WebSearchSkill
+    from nayak.skills.system_info_skill import SystemInfoSkill
+
+    web_skill = WebSearchSkill()
+    sys_skill = SystemInfoSkill()
+    await platform.load_skill(web_skill.manifest)
+    await platform.load_skill(sys_skill.manifest)
+    logger.info("Core skills loaded: web-search, system-info")
+    logger.info("NAYAK Studio available: python -m nayak studio")
+
     logger.info("Default modules loaded.\n%s", registry.summary())
