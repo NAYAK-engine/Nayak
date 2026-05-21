@@ -7,6 +7,7 @@ from .discovery import AgentDiscovery, AgentInfo
 from .messenger import AgentMessenger, AgentMessage, MessageType
 from .delegation import TaskDelegator, Task, TaskStatus
 from .shared_state import SharedState, StateEntry
+from .coordinator import NayakCoordinator, CoordinatorConfig
 
 __all__ = [
     "AgentDiscovery",
@@ -19,4 +20,6 @@ __all__ = [
     "TaskStatus",
     "SharedState",
     "StateEntry",
+    "NayakCoordinator",
+    "CoordinatorConfig",
 ]
