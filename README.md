@@ -6,7 +6,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/Version-0.2.0-green)]()
+[![Version](https://img.shields.io/badge/Version-0.3.1-green)]()
 [![Status](https://img.shields.io/badge/Status-Alpha-orange)]()
 [![Ollama](https://img.shields.io/badge/AI-Ollama-black)](https://ollama.com)
 [![Gemini](https://img.shields.io/badge/AI-Gemini-blue)](https://aistudio.google.com)
@@ -126,6 +126,7 @@ When NAYAK starts, the runtime boots all 9 layers in order:
 ```bash
 [L1] camera-hal         — READY  (Hardware abstraction backend)
 [L1] raspberry-pi-hal   — READY  (Hardware abstraction backend)
+[L1] gpio-hal           — READY  (Hardware abstraction backend)
 [L3] cognition.ollama   — READY  (Cognition backend)
 [L6] text-communication — READY  (Communication backend)
 [L7] nayak-safety       — READY  (Safety engine)
@@ -143,7 +144,8 @@ Every decision is checked by the Safety Engine.
 
 - [x] v0.1.0 — Autonomous browser agent
 - [x] v0.2.0 — Complete 9-layer OS architecture
-- [ ] v0.3.0 — Physical robot support (Raspberry Pi)
+- [x] v0.3.0 — Physical robot support (Raspberry Pi)
+- [x] v0.3.1 — Hardware auto-detection & system hardening
 - [ ] v0.4.0 — Multi-agent coordination
 - [ ] v0.5.0 — Skill marketplace
 - [ ] v1.0.0 — The standard. Every robot runs NAYAK.
