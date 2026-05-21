@@ -444,7 +444,9 @@ class EventBus:
 
         Large-payload guard: if the payload contains a ``"data"`` key and its
         total string length exceeds 10 000 characters, a WARNING is emitted
-        recommending :data:`shm_bus` for the data.
+        with the message ``"Use spinal_bridge.read_shm_frame() for sensor
+        data"``.  Sensor frames and binary blobs must travel through the SHM
+        channel — never through the event bus.
 
         Args:
             event: The :class:`NayakEvent` to broadcast.
@@ -453,7 +455,7 @@ class EventBus:
         if "data" in event.payload and len(str(event.payload)) > _LARGE_PAYLOAD_THRESHOLD:
             logger.warning(
                 "EventBus: Large payload detected on event '%s' (~%d chars) — "
-                "consider using shm_bus for this data to avoid serialization overhead",
+                "Use spinal_bridge.read_shm_frame() for sensor data",
                 event.type.name,
                 len(str(event.payload)),
             )

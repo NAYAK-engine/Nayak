@@ -1,13 +1,20 @@
 """
 nayak/hal/camera.py — NAYAK HAL: Camera hardware backend.
 
-Provides a concrete :class:`HardwareBase` implementation for camera devices.
-When ``cv2`` (OpenCV) is available *and* a physical camera can be opened the
-backend operates in **real hardware mode** — frames are captured directly from
-the device.  When OpenCV is not installed, or when no camera is present, the
-backend falls back to **simulated mode**: every read returns a deterministic
-metadata dict with ``"frame": None`` so the full NAYAK perception stack can
-run on any machine without hardware.
+Provides a concrete :class:`HardwareBase` implementation for camera devices
+with **three-tier automatic hardware detection**:
+
+1. **picamera2** (Raspberry Pi CSI camera) — highest priority.  Native Pi
+   camera library providing direct access to the Broadcom ISP.
+2. **OpenCV** (``cv2.VideoCapture``) — fallback for USB webcams and generic
+   V4L2 devices.  Works on Pi, Linux, macOS, and Windows.
+3. **Simulated** — zero-dependency mode.  Returns metadata-only dicts so the
+   full NAYAK perception stack can run on any machine without hardware.
+
+Detection runs **at connect time** per device.  The selected backend is stored
+in ``DeviceInfo.metadata["camera_type"]`` (``"picamera2"`` | ``"opencv"`` |
+``"simulated"``) and every :meth:`read` result carries a ``"source"`` key for
+debugging provenance.
 
 Usage::
 
@@ -18,6 +25,7 @@ Usage::
     ok = await camera.connect("cam_0")
     frame_data = await camera.read("cam_0")
     # frame_data["frame"] is a numpy array (real) or None (simulated)
+    # frame_data["source"] in {"picamera2", "opencv", "simulated"}
 
     await camera.stop()
 
@@ -44,18 +52,22 @@ logger = logging.getLogger(__name__)
 class CameraHAL(HardwareBase):
     """Camera hardware backend for the NAYAK Hardware Abstraction Layer.
 
-    Wraps OpenCV's ``VideoCapture`` interface and exposes it through the
-    standard HAL contract.  Operates in two modes:
+    Implements three-tier automatic camera detection at connect time:
 
-    **Real hardware mode** (``cv2`` available, camera index openable)
-        :meth:`read` returns ``{"frame": <numpy.ndarray>, "simulated": False,
-        "timestamp": <float>}``.  The ``frame`` value is a raw BGR image array
-        as returned by ``cv2.VideoCapture.read()``.
+    **Tier 1 — picamera2** (``camera_type="picamera2"``)
+        Uses the ``picamera2`` library for native Raspberry Pi CSI camera
+        access.  :meth:`read` returns ``{"frame": <numpy.ndarray>,
+        "source": "picamera2", "simulated": False, ...}``.
 
-    **Simulated mode** (``cv2`` absent *or* ``VideoCapture`` fails to open)
-        :meth:`read` returns ``{"frame": None, "simulated": True,
-        "resolution": "640x480", "fps": 30, "timestamp": <float>}``.
-        No OpenCV dependency is required for this path — safe on any machine.
+    **Tier 2 — OpenCV** (``camera_type="opencv"``)
+        Falls back to ``cv2.VideoCapture(0)`` for USB webcams and generic
+        capture devices.  :meth:`read` returns ``{"frame": <numpy.ndarray>,
+        "source": "opencv", "simulated": False, ...}``.
+
+    **Tier 3 — Simulated** (``camera_type="simulated"``)
+        No real camera available.  :meth:`read` returns ``{"frame": None,
+        "source": "simulated", "simulated": True, "resolution": "640x480",
+        "fps": 30, ...}``.
 
     Cameras are **read-only** devices; :meth:`write` always returns ``False``
     with a logged warning.
@@ -63,9 +75,7 @@ class CameraHAL(HardwareBase):
     Attributes:
         devices (dict[str, DeviceInfo]):
             Registry of every camera device managed by this backend, keyed by
-            ``device_id``.  ``DeviceInfo.metadata`` stores the ``cv2``
-            ``VideoCapture`` object under the key ``"cap"`` when running in
-            real hardware mode.
+            ``device_id``.
     """
 
     # ── HardwareBase contract ─────────────────────────────────────────────────
@@ -84,26 +94,22 @@ class CameraHAL(HardwareBase):
     async def connect(self, device_id: str) -> bool:
         """Connect to the camera identified by *device_id*.
 
-        Creates (or resets) a :class:`~nayak.hal.base.DeviceInfo` entry with
-        ``device_type=CAMERA`` and attempts to open a ``cv2.VideoCapture``
-        handle for device index ``0`` (default camera).  The method succeeds in
-        three scenarios:
+        Runs the three-tier auto-detection sequence:
 
-        1. **OpenCV available + camera opens** — real hardware mode;
-           the ``VideoCapture`` object is stored in
-           ``DeviceInfo.metadata["cap"]``.
-        2. **OpenCV available but camera fails to open** — status set to
-           :attr:`~nayak.hal.base.DeviceStatus.ERROR`; returns ``False``.
-        3. **OpenCV not installed** — simulated mode;
-           ``DeviceInfo.metadata["simulated"] = True``; returns ``True``.
+        1. **picamera2** — ``from picamera2 import Picamera2``.  If successful,
+           creates a ``Picamera2`` instance, configures a preview at 640×480,
+           and starts it.
+        2. **OpenCV** — ``cv2.VideoCapture(0)``.  If the capture opens
+           successfully, the handle is stored in device metadata.
+        3. **Simulated** — both real backends failed; the device is registered
+           in simulation mode.
 
         Args:
             device_id: Unique identifier for this camera connection
                        (e.g. ``"cam_0"``, ``"front_camera"``).
 
         Returns:
-            ``True`` on success (real or simulated), ``False`` if a physical
-            camera could not be opened or an unexpected error occurred.
+            ``True`` on success (any tier), ``False`` only on unexpected error.
         """
         try:
             # ── Create / reset DeviceInfo entry ───────────────────────────────
@@ -115,7 +121,36 @@ class CameraHAL(HardwareBase):
             )
             device = self.devices[device_id]
 
-            # ── Attempt OpenCV import ─────────────────────────────────────────
+            # ── Tier 1: picamera2 (Pi CSI camera) ─────────────────────────────
+            try:
+                from picamera2 import Picamera2  # type: ignore[import]
+
+                picam = Picamera2()
+                config = picam.create_preview_configuration(
+                    main={"size": (640, 480)},
+                )
+                picam.configure(config)
+                picam.start()
+
+                device.status = DeviceStatus.CONNECTED
+                device.metadata["simulated"] = False
+                device.metadata["camera_type"] = "picamera2"
+                device.metadata["picam"] = picam
+                device.connected_at = time.time()
+                logger.info(
+                    "CameraHAL: '%s' connected via picamera2 "
+                    "(Raspberry Pi CSI camera)",
+                    device_id,
+                )
+                return True
+
+            except (ImportError, RuntimeError, OSError) as exc:
+                logger.debug(
+                    "CameraHAL: picamera2 not available for '%s': %s",
+                    device_id, exc,
+                )
+
+            # ── Tier 2: OpenCV (USB webcam / generic V4L2) ────────────────────
             try:
                 import cv2  # type: ignore[import]
 
@@ -123,37 +158,42 @@ class CameraHAL(HardwareBase):
                 if cap.isOpened():
                     device.status = DeviceStatus.CONNECTED
                     device.metadata["simulated"] = False
+                    device.metadata["camera_type"] = "opencv"
                     device.metadata["cap"] = cap
                     device.metadata["cv2_available"] = True
                     device.connected_at = time.time()
                     logger.info(
-                        "CameraHAL: '%s' connected via OpenCV (real hardware)",
+                        "CameraHAL: '%s' connected via OpenCV "
+                        "(USB / generic camera)",
                         device_id,
                     )
                     return True
                 else:
-                    # OpenCV present but no camera accessible at index 0.
                     cap.release()
-                    device.status = DeviceStatus.ERROR
-                    logger.error(
-                        "CameraHAL: '%s' — OpenCV available but "
-                        "VideoCapture(0) failed to open",
+                    logger.debug(
+                        "CameraHAL: OpenCV available but VideoCapture(0) "
+                        "failed for '%s'",
                         device_id,
                     )
-                    return False
 
             except ImportError:
-                # cv2 not installed — fall through to simulated mode.
-                device.status = DeviceStatus.CONNECTED
-                device.metadata["simulated"] = True
-                device.metadata["cv2_available"] = False
-                device.connected_at = time.time()
-                logger.info(
-                    "CameraHAL: '%s' connected in simulated mode "
-                    "(cv2 / OpenCV not available)",
+                logger.debug(
+                    "CameraHAL: cv2 / OpenCV not available for '%s'",
                     device_id,
                 )
-                return True
+
+            # ── Tier 3: Simulated mode ────────────────────────────────────────
+            device.status = DeviceStatus.CONNECTED
+            device.metadata["simulated"] = True
+            device.metadata["camera_type"] = "simulated"
+            device.metadata["cv2_available"] = False
+            device.connected_at = time.time()
+            logger.info(
+                "CameraHAL: '%s' connected in SIMULATED mode "
+                "(no camera hardware detected)",
+                device_id,
+            )
+            return True
 
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -167,10 +207,15 @@ class CameraHAL(HardwareBase):
     async def disconnect(self, device_id: str) -> bool:
         """Disconnect the camera identified by *device_id*.
 
-        Releases the underlying ``cv2.VideoCapture`` handle if one is present,
-        then sets the device status to
-        :attr:`~nayak.hal.base.DeviceStatus.DISCONNECTED`.
-        Safe to call even if *device_id* is not tracked.
+        Releases the underlying capture handle based on the detected camera
+        type:
+
+        * **picamera2** — calls ``picam.stop()`` then ``picam.close()``.
+        * **OpenCV** — calls ``cap.release()``.
+        * **Simulated** — no resources to release.
+
+        Then sets the device status to ``DISCONNECTED``.  Safe to call even if
+        *device_id* is not tracked.
 
         Args:
             device_id: Unique identifier for the camera to disconnect.
@@ -187,19 +232,40 @@ class CameraHAL(HardwareBase):
                 )
                 return True
 
-            cap = device.metadata.get("cap")
-            if cap is not None:
-                try:
-                    cap.release()
-                    logger.debug(
-                        "CameraHAL: VideoCapture released for '%s'", device_id
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "CameraHAL: error releasing VideoCapture for '%s': %s",
-                        device_id, exc,
-                    )
-                device.metadata.pop("cap", None)
+            camera_type = device.metadata.get("camera_type", "simulated")
+
+            # ── Release picamera2 ─────────────────────────────────────────────
+            if camera_type == "picamera2":
+                picam = device.metadata.pop("picam", None)
+                if picam is not None:
+                    try:
+                        picam.stop()
+                        picam.close()
+                        logger.debug(
+                            "CameraHAL: picamera2 released for '%s'",
+                            device_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "CameraHAL: error releasing picamera2 for '%s': %s",
+                            device_id, exc,
+                        )
+
+            # ── Release OpenCV ────────────────────────────────────────────────
+            elif camera_type == "opencv":
+                cap = device.metadata.pop("cap", None)
+                if cap is not None:
+                    try:
+                        cap.release()
+                        logger.debug(
+                            "CameraHAL: VideoCapture released for '%s'",
+                            device_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "CameraHAL: error releasing VideoCapture for '%s': %s",
+                            device_id, exc,
+                        )
 
             device.status = DeviceStatus.DISCONNECTED
             logger.info("CameraHAL: '%s' disconnected", device_id)
@@ -215,28 +281,40 @@ class CameraHAL(HardwareBase):
     async def read(self, device_id: str) -> Any:
         """Read the latest frame from the camera identified by *device_id*.
 
-        **Simulated mode** returns a metadata-only dict — no real image data::
+        Routes to the correct capture backend based on
+        ``DeviceInfo.metadata["camera_type"]``:
+
+        **picamera2**::
+
+            {
+                "frame":      <numpy.ndarray>,  # BGR image, shape (H, W, 3)
+                "source":     "picamera2",
+                "simulated":  False,
+                "timestamp":  <float>,
+            }
+
+        **OpenCV**::
+
+            {
+                "frame":      <numpy.ndarray>,  # BGR image, shape (H, W, 3)
+                "source":     "opencv",
+                "simulated":  False,
+                "timestamp":  <float>,
+            }
+
+        **Simulated**::
 
             {
                 "frame":      None,
+                "source":     "simulated",
                 "simulated":  True,
                 "resolution": "640x480",
                 "fps":        30,
                 "timestamp":  <float>,
             }
 
-        **Real hardware mode** captures a live frame via ``VideoCapture.read()``::
-
-            {
-                "frame":      <numpy.ndarray>,   # BGR image, shape (H, W, 3)
-                "simulated":  False,
-                "timestamp":  <float>,
-            }
-
-        If the capture fails (``ret=False``), ``None`` is returned and the
-        error is logged.  A :attr:`~nayak.core.bus.EventType.DEVICE_DATA` bus
-        event is emitted after every successful read so that perception backends
-        can subscribe without polling.
+        A :attr:`~nayak.core.bus.EventType.DEVICE_DATA` bus event is emitted
+        after every successful read.
 
         Args:
             device_id: Unique identifier of the camera to read from.
@@ -259,41 +337,70 @@ class CameraHAL(HardwareBase):
                 )
                 return None
 
-            # ── Simulated path ────────────────────────────────────────────────
-            if device.metadata.get("simulated", False):
-                data: dict[str, Any] = {
-                    "frame":      None,
-                    "simulated":  True,
-                    "resolution": "640x480",
-                    "fps":        30,
-                    "timestamp":  time.time(),
-                }
-                await self.emit_device_event(device_id, data)
-                return data
+            camera_type = device.metadata.get("camera_type", "simulated")
 
-            # ── Real hardware path ────────────────────────────────────────────
-            cap = device.metadata.get("cap")
-            if cap is None:
-                logger.error(
-                    "CameraHAL: no VideoCapture handle for '%s'", device_id
+            # ── picamera2 path ────────────────────────────────────────────────
+            if camera_type == "picamera2":
+                picam = device.metadata.get("picam")
+                if picam is None:
+                    logger.error(
+                        "CameraHAL: no Picamera2 instance for '%s'", device_id,
+                    )
+                    return None
+                try:
+                    frame = picam.capture_array()
+                    data: dict[str, Any] = {
+                        "frame": frame,
+                        "source": "picamera2",
+                        "simulated": False,
+                        "timestamp": time.time(),
+                    }
+                    await self.emit_device_event(device_id, data)
+                    return data
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "CameraHAL: picamera2 capture failed for '%s': %s",
+                        device_id, exc,
+                    )
+                    return None
+
+            # ── OpenCV path ───────────────────────────────────────────────────
+            if camera_type == "opencv":
+                cap = device.metadata.get("cap")
+                if cap is None:
+                    logger.error(
+                        "CameraHAL: no VideoCapture handle for '%s'", device_id,
+                    )
+                    return None
+
+                ret, frame = cap.read()
+                if ret:
+                    data = {
+                        "frame": frame,
+                        "source": "opencv",
+                        "simulated": False,
+                        "timestamp": time.time(),
+                    }
+                    await self.emit_device_event(device_id, data)
+                    return data
+
+                logger.warning(
+                    "CameraHAL: VideoCapture.read() returned False for '%s'",
+                    device_id,
                 )
                 return None
 
-            ret, frame = cap.read()
-            if ret:
-                data = {
-                    "frame":     frame,
-                    "simulated": False,
-                    "timestamp": time.time(),
-                }
-                await self.emit_device_event(device_id, data)
-                return data
-
-            logger.warning(
-                "CameraHAL: VideoCapture.read() returned False for '%s'",
-                device_id,
-            )
-            return None
+            # ── Simulated path ────────────────────────────────────────────────
+            data = {
+                "frame": None,
+                "source": "simulated",
+                "simulated": True,
+                "resolution": "640x480",
+                "fps": 30,
+                "timestamp": time.time(),
+            }
+            await self.emit_device_event(device_id, data)
+            return data
 
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -355,9 +462,10 @@ class CameraHAL(HardwareBase):
     async def stop(self) -> None:
         """Gracefully shut down the Camera HAL backend.
 
-        Releases all ``VideoCapture`` handles by calling :meth:`disconnect` on
-        every tracked device, then promotes the module status to
-        :attr:`~nayak.core.registry.ModuleStatus.STOPPED` in the registry.
+        Releases all capture handles (picamera2, OpenCV) by calling
+        :meth:`disconnect` on every tracked device, then promotes the module
+        status to :attr:`~nayak.core.registry.ModuleStatus.STOPPED` in the
+        registry.
 
         Safe to call even if no devices have been connected.
 
@@ -371,7 +479,7 @@ class CameraHAL(HardwareBase):
         try:
             registry.set_status(self.name, ModuleStatus.STOPPED)
             logger.info(
-                "CameraHAL: stopped and all VideoCapture handles released"
+                "CameraHAL: stopped and all capture handles released"
             )
         except KeyError:
             # stop() called before init() — registry entry does not exist yet.
@@ -396,6 +504,7 @@ Import and use directly — no instantiation required::
     await camera.connect("cam_0")
     frame_data = await camera.read("cam_0")
     # frame_data["frame"] → numpy array (real) or None (simulated)
+    # frame_data["source"] → "picamera2" | "opencv" | "simulated"
     await camera.stop()
 """
 

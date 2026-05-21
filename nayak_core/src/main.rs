@@ -4,17 +4,25 @@
  * This is the Rust layer of NAYAK.
  * Runs independently of the Python brain.
  * Handles Layer 1 (HAL) and Layer 4 (Action) at 1000 Hz+.
- * Communicates with the Python brain via JSON over stdin/stdout.
  *
- * Architecture:
- *   Python Brain (Layer 3)  ←→  JSON IPC  ←→  Rust Spinal Cord (Layer 1+4)
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │                  IPC Architecture                               │
+ * │                                                                 │
+ * │  JSON over stdin/stdout  →  control signals ONLY  (small text) │
+ * │  Shared memory (mmap)    →  sensor frames  (large binary, RT)  │
+ * │                                                                 │
+ * │  RULE: Never mix them. Never put sensor data in JSON IPC.       │
+ * └─────────────────────────────────────────────────────────────────┘
  *
  * Data flow:
- *   Commands  : Python writes a JSON line to the spinal cord's stdin.
- *   Responses : Rust writes a JSON line to stdout; Python reads it.
- *   Heartbeat : Every 1 000 control-loop ticks (≈ 1 second) a heartbeat
- *               JSON line is written to stdout.
- *   Stderr    : Diagnostic / error messages only — never parsed by Python.
+ *   Commands   : Python writes a JSON line to the spinal cord's stdin.
+ *   Responses  : Rust writes a JSON line to stdout; Python reads it.
+ *   Heartbeat  : Every 1 000 control-loop ticks (≈ 1 second) a heartbeat
+ *                JSON line is written to stdout.
+ *   Sensor SHM : Every 100 ticks (≈ 10 Hz) a raw sensor frame is written
+ *                into a memory-mapped file.  Python reads it with mmap —
+ *                zero serialization, zero JSON overhead.
+ *   Stderr     : Diagnostic / error messages only — never parsed by Python.
  *
  * JSON command schema  (Python → Rust):
  * {
@@ -33,11 +41,18 @@
  *   "timestamp_ms": <u64>,
  *   "latency_us":   <u64 microseconds to parse + dispatch command>
  * }
+ *
+ * Shared memory frame file layout (no header, raw bytes):
+ *   [0 .. N-1]  Raw sensor bytes (camera, LIDAR, tensor, etc.)
+ *   Python reads exactly N bytes via mmap — no parsing needed.
  */
 
 mod hal;
 
+use std::fs::OpenOptions;
+use std::io;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use memmap2::MmapMut;
 use tokio::time;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +102,83 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Write a raw sensor frame into a memory-mapped file.
+///
+/// Opens (or creates) the file at `shm_path`, sets its length to exactly
+/// `data.len()` bytes, memory-maps it, and copies `data` directly into the
+/// map.  No JSON serialization.  No stdout.  Pure binary.
+///
+/// # Channel contract
+/// This function is the **only** place where sensor data leaves the Rust
+/// process.  The Python side reads it with `mmap` — no JSON, no copy.
+///
+/// # Arguments
+/// * `data`     – Raw sensor bytes (camera frame, LIDAR scan, tensor, …).
+/// * `shm_path` – Path to the backing file (e.g. `/tmp/nayak_sensor_frame`).
+///
+/// # Errors
+/// All I/O errors are logged to `stderr` and the function returns without
+/// panicking.  A transient write failure (e.g. full disk) is non-fatal —
+/// the control loop continues at 1 kHz regardless.
+fn write_shm_frame(data: &[u8], shm_path: &str) {
+    // ── Open or create the backing file ─────────────────────────────────────
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(shm_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("NAYAK Spinal [SHM]: cannot open '{}': {}", shm_path, e);
+            return;
+        }
+    };
+
+    // ── Resize the file to match the payload ─────────────────────────────────
+    // set_len is cheap: it only adjusts the file metadata, not the data.
+    if let Err(e) = file.set_len(data.len() as u64) {
+        eprintln!(
+            "NAYAK Spinal [SHM]: set_len({}) failed on '{}': {}",
+            data.len(), shm_path, e
+        );
+        return;
+    }
+
+    // ── Memory-map the file ──────────────────────────────────────────────────
+    // SAFETY: We own the file exclusively for the duration of this function.
+    // The mmap is dropped before `file` is released, satisfying the aliasing
+    // requirement documented in the memmap2 crate.
+    let mut mmap: MmapMut = match unsafe { MmapMut::map_mut(&file) } {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "NAYAK Spinal [SHM]: mmap failed for '{}': {}",
+                shm_path, e
+            );
+            return;
+        }
+    };
+
+    // ── Copy raw bytes directly into the map ─────────────────────────────────
+    // No serialization.  No JSON.  Raw bytes only.
+    mmap[..data.len()].copy_from_slice(data);
+
+    // Explicitly flush to ensure the OS page cache is updated before
+    // the Python reader maps the same file.
+    if let Err(e) = mmap.flush() {
+        eprintln!(
+            "NAYAK Spinal [SHM]: flush failed for '{}': {}",
+            shm_path, e
+        );
+        // Non-fatal: the data may still be readable by the consumer.
+    }
+}
+
+// Silence the unused-import warning; io is referenced in future Pi HAL code.
+#[allow(dead_code)]
+fn _io_placeholder() -> io::Result<()> { Ok(()) }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Control loop  (1 000 Hz independent ticker)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,18 +189,52 @@ fn now_ms() -> u64 {
 /// (PID updates, motor commands, watchdog resets) belongs here — it must
 /// never block on I/O or Python.
 ///
-/// Currently the loop emits a heartbeat JSON line to stdout every 1 000 ticks
-/// (≈ 1 second) so the Python brain knows the spinal cord is alive.
+/// # IPC channels used by this loop
+///
+/// | Cadence     | Channel             | Content                          |
+/// |-------------|---------------------|----------------------------------|
+/// | Every 100 t | SHM mmap file       | Raw sensor frame (binary, 10 Hz) |
+/// | Every 1000 t| JSON → stdout       | Heartbeat control signal (1 Hz)  |
+///
+/// The two channels are **never mixed**: sensor data never enters JSON IPC
+/// and control signals never go through shared memory.
 async fn control_loop() {
     // 1 000 µs = 1 kHz
     let mut interval = time::interval(Duration::from_micros(1_000));
     let mut tick: u64 = 0;
 
+    // Path where Python reads sensor frames via mmap.
+    // On Linux/macOS this lives in the OS temp directory.
+    // On Windows it will be created in C:\Users\<user>\AppData\Local\Temp\
+    // or wherever the OS resolves "/tmp" via WSL / MSYS2 compatibility layers.
+    // Adjust to a platform-specific path if needed (e.g. via env var).
+    let shm_path = if cfg!(windows) {
+        std::env::temp_dir()
+            .join("nayak_sensor_frame")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        "/tmp/nayak_sensor_frame".to_owned()
+    };
+
     loop {
         interval.tick().await;
         tick += 1;
 
-        // ── 1 Hz heartbeat ───────────────────────────────────────────────────
+        // ── 10 Hz sensor frame → shared memory ──────────────────────────────
+        // Write a raw sensor frame every 100 ticks (≈ 10 Hz).
+        // In production replace `vec![0u8; 1024]` with real sensor data
+        // (camera frame bytes, LIDAR scan, IMU tensor, etc.).
+        //
+        // Rule: NO JSON. NO stdout. Raw bytes into the mmap file ONLY.
+        if tick % 100 == 0 {
+            let frame = vec![0u8; 1024]; // 1 KB simulated sensor payload
+            write_shm_frame(&frame, &shm_path);
+        }
+
+        // ── 1 Hz heartbeat → JSON stdout ─────────────────────────────────────
+        // Control signals only: tiny text payload, tells the Python brain
+        // the spinal cord is alive.  Never carries sensor data.
         if tick % 1_000 == 0 {
             let heartbeat = serde_json::json!({
                 "type":       "heartbeat",
@@ -227,7 +353,8 @@ async fn main() {
     eprintln!("║  NAYAK Spinal Cord v0.1.0                ║");
     eprintln!("║  Hard Real-Time Runtime Starting         ║");
     eprintln!("║  Control loop: 1000 Hz                   ║");
-    eprintln!("║  IPC: JSON over stdin/stdout             ║");
+    eprintln!("║  Control IPC : JSON over stdin/stdout    ║");
+    eprintln!("║  Sensor IPC  : mmap shared memory (SHM)  ║");
     eprintln!("╚══════════════════════════════════════════╝");
 
     // Run control loop and IPC listener concurrently.

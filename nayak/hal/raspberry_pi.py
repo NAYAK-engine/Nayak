@@ -2,11 +2,16 @@
 nayak/hal/raspberry_pi.py — NAYAK HAL: Raspberry Pi hardware backend.
 
 Provides a concrete :class:`HardwareBase` implementation targeting the
-Raspberry Pi GPIO ecosystem.  When ``RPi.GPIO`` is not available (i.e. the
-process is running on a development machine rather than actual Pi hardware)
-the backend transparently falls back to *simulated mode* — every operation
-succeeds and returns deterministic placeholder data.  This lets the full
-NAYAK stack run, test, and integrate on any machine without physical hardware.
+Raspberry Pi GPIO ecosystem.  Auto-detects real hardware at instantiation:
+
+* **Real hardware mode** — ``RPi.GPIO`` imported successfully; GPIO reads
+  sample physical BCM lines, writes drive real outputs.
+* **Simulated mode** — ``RPi.GPIO`` not available; all operations succeed
+  with deterministic placeholder data, zero errors.
+
+The backend probes camera availability and generates a comprehensive
+:meth:`hardware_report` at boot so operators always know exactly what
+hardware is available.
 
 Usage::
 
@@ -16,6 +21,7 @@ Usage::
 
     ok = await raspberry_pi.connect("sensor_0")
     data = await raspberry_pi.read("sensor_0")
+    report = raspberry_pi.hardware_report()
     await raspberry_pi.stop()
 
 The module exposes a process-wide singleton :data:`raspberry_pi` so that all
@@ -44,19 +50,61 @@ class RaspberryPiHAL(HardwareBase):
     This backend abstracts GPIO, sensor buses (I²C, SPI, UART), and camera
     interfaces available on Raspberry Pi hardware.  On non-Pi hosts the backend
     enters *simulated mode* automatically: all reads return structured dummy
-    payloads and writes are logged but otherwise no-op.  Simulated mode is
-    indicated by ``DeviceInfo.metadata["simulated"] == True``.
+    payloads and writes are logged but otherwise no-op.
 
-    Simulated mode is designed to be fully deterministic and stable so that
-    integration tests, CI pipelines, and developer machines can exercise the
-    entire NAYAK software stack without requiring physical hardware.
+    At instantiation the class probes for:
+
+    * ``RPi.GPIO`` — sets ``_on_pi`` and ``_gpio_available``.
+    * Camera hardware — probes picamera2 then OpenCV to determine
+      ``_camera_type`` (``"picamera2"`` | ``"opencv"`` | ``"none"``).
+
+    The :meth:`hardware_report` method returns a dict summarising the detected
+    hardware, and this report is logged at INFO level during :meth:`init`.
 
     Attributes:
+        _on_pi (bool):
+            ``True`` when running on a real Raspberry Pi with GPIO access.
+        _gpio (module | None):
+            Reference to the ``RPi.GPIO`` module, or ``None`` in simulation.
+        _gpio_available (bool):
+            Whether ``RPi.GPIO`` was imported successfully.
+        _camera_type (str):
+            Detected camera backend: ``"picamera2"``, ``"opencv"``, or
+            ``"none"``.
         devices (dict[str, DeviceInfo]):
             Registry of every device managed by this backend, keyed by
             ``device_id``.  Populated on :meth:`connect` and cleared on
             :meth:`stop`.
     """
+
+    def __init__(self) -> None:
+        """Initialise the Raspberry Pi HAL backend and auto-detect hardware.
+
+        Probes for ``RPi.GPIO`` and camera hardware.  This constructor
+        **never raises** — hardware absence is a normal operating condition.
+        """
+        # ── GPIO auto-detection ───────────────────────────────────────────────
+        try:
+            import RPi.GPIO as GPIO  # type: ignore[import]
+
+            self._on_pi = True
+            self._gpio = GPIO
+            self._gpio_available = True
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            logger.info(
+                "RaspberryPiHAL: RPi.GPIO detected — REAL hardware mode"
+            )
+        except (ImportError, RuntimeError):
+            self._on_pi = False
+            self._gpio = None
+            self._gpio_available = False
+            logger.info(
+                "RaspberryPiHAL: RPi.GPIO not available — SIMULATION mode"
+            )
+
+        # ── Camera auto-detection ─────────────────────────────────────────────
+        self._camera_type = self._detect_camera_type()
 
     # ── HardwareBase contract ─────────────────────────────────────────────────
 
@@ -76,13 +124,8 @@ class RaspberryPiHAL(HardwareBase):
 
         If *device_id* is not yet tracked, a new :class:`~nayak.hal.base.DeviceInfo`
         entry is created with a generic type of :attr:`~nayak.hal.base.DeviceType.GENERIC`.
-        The method then attempts to import ``RPi.GPIO``:
-
-        * **On a real Raspberry Pi** — GPIO is available; the device is
-          registered as ``CONNECTED`` with real hardware metadata.
-        * **On any other machine** — GPIO import fails; the device is still
-          registered as ``CONNECTED`` with ``metadata["simulated"] = True``
-          so that the rest of the stack can operate normally.
+        The device is registered as ``CONNECTED`` with metadata reflecting
+        the detected hardware mode.
 
         Args:
             device_id: Unique identifier for the device to connect
@@ -106,28 +149,16 @@ class RaspberryPiHAL(HardwareBase):
 
             device = self.devices[device_id]
 
-            # ── Attempt real GPIO import ──────────────────────────────────────
-            try:
-                import RPi.GPIO as GPIO  # type: ignore[import]  # noqa: F401
-                device.status = DeviceStatus.CONNECTED
-                device.metadata.setdefault("simulated", False)
-                device.metadata["gpio_available"] = True
-                logger.info(
-                    "RaspberryPiHAL: '%s' connected via RPi.GPIO (real hardware)",
-                    device_id,
-                )
-            except ImportError:
-                # Not on a Pi — engage simulated mode transparently.
-                device.status = DeviceStatus.CONNECTED
-                device.metadata["simulated"] = True
-                device.metadata["gpio_available"] = False
-                logger.info(
-                    "RaspberryPiHAL: '%s' connected in simulated mode "
-                    "(RPi.GPIO not available)",
-                    device_id,
-                )
-
+            device.status = DeviceStatus.CONNECTED
+            device.metadata["simulated"] = not self._on_pi
+            device.metadata["gpio_available"] = self._gpio_available
             device.connected_at = time.time()
+
+            logger.info(
+                "RaspberryPiHAL: '%s' connected (mode=%s)",
+                device_id,
+                "real" if self._on_pi else "simulated",
+            )
             return True
 
         except Exception as exc:  # noqa: BLE001
@@ -177,26 +208,14 @@ class RaspberryPiHAL(HardwareBase):
         """Read the latest data from *device_id*.
 
         If the device is not in a connected/active state ``None`` is returned
-        immediately.  In simulated mode the return value is a deterministic
-        dict shaped to match the device's :class:`~nayak.hal.base.DeviceType`:
+        immediately.
 
-        +-----------------+-------------------------------------------------------+
-        | DeviceType      | Simulated payload                                     |
-        +=================+=======================================================+
-        | CAMERA          | ``{"frame": "simulated_frame", "resolution": "640x480"}`` |
-        +-----------------+-------------------------------------------------------+
-        | SENSOR          | ``{"value": 0.0, "unit": "unknown"}``                 |
-        +-----------------+-------------------------------------------------------+
-        | MOTOR           | ``{"speed": 0, "direction": "stopped"}``              |
-        +-----------------+-------------------------------------------------------+
-        | IMU             | ``{"ax": 0.0, "ay": 0.0, "az": 9.8, "gx": 0.0, "gy": 0.0, "gz": 0.0}`` |
-        +-----------------+-------------------------------------------------------+
-        | *anything else* | ``{"raw": None}``                                     |
-        +-----------------+-------------------------------------------------------+
+        **Real mode**: reads the physical GPIO pin value via ``RPi.GPIO``.
+        **Simulated mode**: returns a deterministic dict shaped to match the
+        device's :class:`~nayak.hal.base.DeviceType`.
 
         A :attr:`~nayak.core.bus.EventType.DEVICE_DATA` bus event is emitted
-        after a successful read so that subscribers (perception, logging) are
-        notified without polling.
+        after a successful read.
 
         Args:
             device_id: Unique identifier of the device to read from.
@@ -219,14 +238,29 @@ class RaspberryPiHAL(HardwareBase):
                 )
                 return None
 
-            # ── Simulated data path ───────────────────────────────────────────
-            if device.metadata.get("simulated", False):
-                data = self._simulated_payload(device)
-            else:
-                # Real GPIO read would happen here.
-                # Subclasses or future revisions extend this branch.
-                data = {"raw": None}
+            # ── Real hardware path ────────────────────────────────────────────
+            if self._on_pi and self._gpio is not None:
+                pin = device.metadata.get("pin")
+                if pin is not None:
+                    try:
+                        value = self._gpio.input(pin)
+                        data: dict[str, Any] = {
+                            "pin": pin,
+                            "value": value,
+                            "simulated": False,
+                            "timestamp": time.time(),
+                        }
+                        await self.emit_device_event(device_id, data)
+                        return data
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "RaspberryPiHAL: GPIO.input(%s) failed: %s",
+                            pin, exc,
+                        )
+                        # Fall through to simulated payload.
 
+            # ── Simulated data path ───────────────────────────────────────────
+            data = self._simulated_payload(device)
             await self.emit_device_event(device_id, data)
             return data
 
@@ -240,10 +274,9 @@ class RaspberryPiHAL(HardwareBase):
     async def write(self, device_id: str, data: Any) -> bool:
         """Send *data* to the device identified by *device_id*.
 
-        In simulated mode the command is logged at DEBUG level and the method
-        returns ``True`` immediately without any physical I/O.  On real hardware
-        this is the extension point where GPIO writes, PWM duty-cycle updates,
-        or serial commands would be dispatched.
+        **Real mode**: if the data dict contains ``"pin"`` and ``"value"``
+        keys, drives the physical GPIO line via ``RPi.GPIO``.
+        **Simulated mode**: logs the command at DEBUG level and returns ``True``.
 
         Args:
             device_id: Unique identifier of the target device.
@@ -266,16 +299,29 @@ class RaspberryPiHAL(HardwareBase):
                 )
                 return False
 
-            if device.metadata.get("simulated", False):
-                logger.debug(
-                    "RaspberryPiHAL [sim]: write to '%s' — data=%r",
-                    device_id, data,
-                )
-                return True
+            # ── Real hardware path ────────────────────────────────────────────
+            if self._on_pi and self._gpio is not None and isinstance(data, dict):
+                pin = data.get("pin")
+                value = data.get("value")
+                if pin is not None and value is not None:
+                    try:
+                        self._gpio.setup(pin, self._gpio.OUT)
+                        self._gpio.output(pin, value)
+                        logger.debug(
+                            "RaspberryPiHAL [REAL]: pin %s = %s", pin, value,
+                        )
+                        device.metadata["pin"] = pin
+                        return True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "RaspberryPiHAL: GPIO.output(%s, %s) failed: %s",
+                            pin, value, exc,
+                        )
+                        return False
 
-            # Real GPIO write would dispatch here.
+            # ── Simulated path ────────────────────────────────────────────────
             logger.debug(
-                "RaspberryPiHAL: write to '%s' — data=%r",
+                "RaspberryPiHAL [SIM]: write to '%s' — data=%r",
                 device_id, data,
             )
             return True
@@ -302,8 +348,8 @@ class RaspberryPiHAL(HardwareBase):
         """Initialise the Raspberry Pi HAL backend and register it with NAYAK.
 
         Calls :meth:`~nayak.hal.base.HardwareBase.register` to publish this
-        backend to the module registry and emit the
-        :attr:`~nayak.core.bus.EventType.HAL_READY` bus event.
+        backend to the module registry, logs the full :meth:`hardware_report`,
+        and emits the :attr:`~nayak.core.bus.EventType.HAL_READY` bus event.
 
         This method **must** be awaited before any :meth:`connect` / :meth:`read`
         / :meth:`write` calls.
@@ -314,13 +360,27 @@ class RaspberryPiHAL(HardwareBase):
             await raspberry_pi.init()
         """
         await self.register()
-        logger.info("RaspberryPiHAL: Raspberry Pi HAL initialized")
+
+        report = self.hardware_report()
+        logger.info(
+            "RaspberryPiHAL: ══════════════════════════════════════════"
+        )
+        logger.info(
+            "RaspberryPiHAL: HARDWARE REPORT"
+        )
+        for key, value in report.items():
+            logger.info(
+                "RaspberryPiHAL:   %-20s = %s", key, value,
+            )
+        logger.info(
+            "RaspberryPiHAL: ══════════════════════════════════════════"
+        )
 
     async def stop(self) -> None:
         """Gracefully shutdown the backend.
 
-        Disconnects every tracked device in order to release hardware resources,
-        then promotes the module status to
+        Disconnects every tracked device, cleans up GPIO resources, and
+        promotes the module status to
         :attr:`~nayak.core.registry.ModuleStatus.STOPPED` in the registry.
 
         Safe to call even if no devices have been connected.
@@ -333,6 +393,8 @@ class RaspberryPiHAL(HardwareBase):
         for device_id in device_ids:
             await self.disconnect(device_id)
 
+        self.cleanup()
+
         try:
             registry.set_status(self.name, ModuleStatus.STOPPED)
             logger.info("RaspberryPiHAL: stopped and all devices disconnected")
@@ -343,7 +405,87 @@ class RaspberryPiHAL(HardwareBase):
                 "skipping registry status update"
             )
 
+    # ── Hardware report ───────────────────────────────────────────────────────
+
+    def hardware_report(self) -> dict[str, Any]:
+        """Generate a comprehensive hardware status report.
+
+        Returns a dict summarising the detected hardware environment.  This
+        report is logged at INFO level during :meth:`init` so operators always
+        know exactly what hardware is available at boot.
+
+        Returns:
+            A dict with the following keys:
+
+            * ``"on_pi"`` (bool) — whether real Pi hardware was detected.
+            * ``"gpio_available"`` (bool) — whether ``RPi.GPIO`` is importable.
+            * ``"camera_type"`` (str) — ``"picamera2"``, ``"opencv"``, or ``"none"``.
+            * ``"simulation_mode"`` (bool) — ``True`` if no real Pi hardware.
+            * ``"device_count"`` (int) — number of currently tracked devices.
+            * ``"timestamp"`` (float) — Unix timestamp of the report.
+
+        Example::
+
+            report = raspberry_pi.hardware_report()
+            # {
+            #     "on_pi": False,
+            #     "gpio_available": False,
+            #     "camera_type": "none",
+            #     "simulation_mode": True,
+            #     "device_count": 0,
+            #     "timestamp": 1716300000.0,
+            # }
+        """
+        return {
+            "on_pi": self._on_pi,
+            "gpio_available": self._gpio_available,
+            "camera_type": self._camera_type,
+            "simulation_mode": not self._on_pi,
+            "device_count": len(self.devices),
+            "timestamp": time.time(),
+        }
+
+    def cleanup(self) -> None:
+        """Release all real GPIO resources.
+
+        On a real Raspberry Pi this calls ``GPIO.cleanup()`` to reset all
+        pin configurations.  In simulated mode this is a safe no-op.
+        """
+        if self._on_pi and self._gpio is not None:
+            try:
+                self._gpio.cleanup()
+                logger.info("RaspberryPiHAL: GPIO.cleanup() completed")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "RaspberryPiHAL: GPIO.cleanup() error: %s", exc,
+                )
+
     # ── Private helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_camera_type() -> str:
+        """Probe for available camera hardware.
+
+        Tries to import ``picamera2`` (Pi CSI camera), then ``cv2`` (OpenCV).
+        Returns the string identifier of the first successful import, or
+        ``"none"`` if neither is available.
+
+        Returns:
+            ``"picamera2"``, ``"opencv"``, or ``"none"``.
+        """
+        try:
+            from picamera2 import Picamera2  # type: ignore[import]  # noqa: F401
+            return "picamera2"
+        except (ImportError, RuntimeError, OSError):
+            pass
+
+        try:
+            import cv2  # type: ignore[import]  # noqa: F401
+            return "opencv"
+        except ImportError:
+            pass
+
+        return "none"
 
     @staticmethod
     def _simulated_payload(device: DeviceInfo) -> dict[str, Any]:
@@ -391,6 +533,7 @@ Import and use directly — no object instantiation required::
     await raspberry_pi.init()
     await raspberry_pi.connect("imu_main")
     data = await raspberry_pi.read("imu_main")
+    report = raspberry_pi.hardware_report()
     await raspberry_pi.stop()
 """
 

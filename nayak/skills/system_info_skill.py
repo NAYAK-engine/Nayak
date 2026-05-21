@@ -17,7 +17,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-import sys
+import platform as _platform
 from typing import Any
 
 from nayak.sdk.base import SkillBase, SkillManifest, SkillType
@@ -76,8 +76,8 @@ class SystemInfoSkill(SkillBase):
                 "cpu_percent": psutil.cpu_percent(),
                 "memory_percent": psutil.virtual_memory().percent,
                 "disk_percent": psutil.disk_usage("/").percent,
-                "platform": sys.platform,
-                "python_version": sys.version,
+                "platform": _platform.system(),
+                "python_version": _platform.python_version(),
                 "nayak_version": "0.2.0",
             }
 
